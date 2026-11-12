@@ -28,19 +28,27 @@ final class GuestMicrophone: ObservableObject {
         observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt else { return }
             self.interrupted = AVAudioSession.InterruptionType(rawValue: raw) == .began
-            if self.interrupted { self.stopCapture() }
+            if self.interrupted { self.stopCapture() } else { self.recoverOutput() }
             self.checkPermission()
         })
         observers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
-            let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
-            // Selecting play-and-record and restoring playback both change the category.
-            guard raw != AVAudioSession.RouteChangeReason.categoryChange.rawValue else { return }
-            self?.stopCapture()
-            self?.checkPermission()
+            guard let self, let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
+            // Switching into or out of recording can invalidate the player too.
+            if reason == .categoryChange {
+                if self.foreground && !self.interrupted { henge_vm_audio_kick() }
+                return
+            }
+            self.stopCapture()
+            if reason == .newDeviceAvailable || reason == .oldDeviceUnavailable || reason == .override {
+                self.recoverOutput()
+            }
+            self.checkPermission()
         })
         observers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
             self?.interrupted = false
             self?.stopCapture()
+            self?.recoverOutput()
             self?.checkPermission()
         })
     }
@@ -59,9 +67,24 @@ final class GuestMicrophone: ObservableObject {
     }
 
     func setForeground(_ active: Bool) {
+        guard foreground != active else { return }
         foreground = active
-        if !active { stopCapture() }
+        if active { recoverOutput() } else { stopCapture() }
         checkPermission()
+    }
+
+    private func recoverOutput() {
+        guard foreground && !interrupted else { return }
+        // Capture owns the play-and-record category. Reactivating output must preserve it.
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setActive(true)
+            let ports = session.currentRoute.outputs.map(\.portName).joined(separator: ", ")
+            HengeLog.log("audio", "output active: \(ports), \(Int(session.sampleRate)) Hz")
+        } catch {
+            HengeLog.log("audio", "output activation failed: \(error.localizedDescription)")
+        }
+        henge_vm_audio_kick()
     }
 
     func followGuest() async {

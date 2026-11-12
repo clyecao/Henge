@@ -23,6 +23,7 @@ struct Desc { uint64_t address; uint32_t length; uint16_t flags, next; };
 
 static void queue(HvVirtio *v, unsigned q) {
     uint64_t base = RAM + q * 0x4000;
+    memset(at(base), 0, 0x4000);
     v->q[q].size = 16;
     v->q[q].enabled = 1;
     v->q[q].desc = base;
@@ -62,6 +63,71 @@ static void capture(HvVirtioSnd *s, unsigned bytes) {
     struct Desc d[] = {{RAM + 0x20000, 4, 1, 1}, {RAM + 0x21000, bytes, 3, 2}, {RAM + 0x21000 + bytes, 8, 2, 0}};
     post(&s->vio, 3, d, 3);
 }
+
+typedef struct { int available, starts, stops, resets; } TestPlayer;
+
+static int start_player(void *opaque, unsigned channels, unsigned format, unsigned rate) {
+    TestPlayer *player = opaque;
+    CHECK(channels == 1 && format == HV_VSND_FMT_S16 && rate == 48000);
+    player->starts++;
+    return player->available ? 0 : -1;
+}
+static void stop_player(void *opaque) { ((TestPlayer *)opaque)->stops++; }
+static void reset_player(void *opaque) { ((TestPlayer *)opaque)->resets++; }
+
+static void output_recovery(HvVirtioSnd *s) {
+    TestPlayer player = {0};
+    s->backend = (HvVirtioSndBackend){start_player, stop_player, reset_player, &player};
+    queue(&s->vio, 0); queue(&s->vio, 2); queue(&s->vio, 3);
+    s->vio.status = 15;
+    CHECK(command(s, 0x101, 0, HV_VSND_FMT_S16) == 0x8000);
+    CHECK(command(s, 0x102, 0, 0) == 0x8000);
+    CHECK(command(s, 0x104, 0, 0) == 0x8000);
+    uint64_t attempt_time = time_ns;
+    put(RAM + 0x22000, 0, 4);
+    struct Desc tx[] = {{RAM + 0x22000, 36, 1, 1}, {RAM + 0x23000, 8, 2, 0}};
+    post(&s->vio, 2, tx, 2);
+    time_ns += 1000000;
+    hv_virtio_snd_poll(s);
+    CHECK(u16(at(s->vio.q[2].used + 2)) == 1); /* guest plays on the clock during failure */
+    for (int failed = 1; failed <= 10; failed++) {
+        unsigned delay = failed < 4 ? 1 : failed < 10 ? 4 : 15;
+        time_ns = attempt_time + delay * 1000000000ull - 1;
+        hv_virtio_snd_poll(s);
+        CHECK(player.starts == failed && !s->host_on);
+        player.available = failed == 10;
+        attempt_time = ++time_ns;
+        hv_virtio_snd_poll(s);
+        CHECK(player.starts == failed + 1);
+    }
+    CHECK(s->host_on && !s->host_failures);
+
+    CHECK(command(s, 0x101, 1, HV_VSND_FMT_FLOAT) == 0x8000);
+    CHECK(command(s, 0x102, 1, 0) == 0x8000);
+    CHECK(command(s, 0x104, 1, 0) == 0x8000);
+    hv_virtio_snd_capture_enable(s, 1);
+    float samples[480];
+    for (unsigned i = 0; i < 480; i++) samples[i] = 0.25f;
+    hv_virtio_snd_capture_push(s, samples, 480);
+    hv_virtio_snd_capture_push(s, samples, 480);
+    capture(s, sizeof samples);
+    hv_virtio_snd_kick(s);
+    hv_virtio_snd_kick(s);
+    time_ns += 10000000;
+    hv_virtio_snd_poll(s);
+    CHECK(player.starts == 12 && player.stops == 1 && player.resets == 1);
+    CHECK(u16(at(s->vio.q[3].used + 2)) == 1 && !memcmp(at(RAM + 0x21000), samples, sizeof samples));
+    CHECK(command(s, 0x105, 0, 0) == 0x8000);
+    hv_virtio_snd_kick(s);
+    hv_virtio_snd_poll(s);
+    CHECK(player.starts == 12 && player.stops == 2 && player.resets == 2);
+    CHECK(command(s, 0x104, 0, 0) == 0x8000);
+    CHECK(player.starts == 13 && s->host_on);
+    s->vio.pci.bar_write(&s->vio.pci, 4, 0x14, 0, 1);
+    CHECK(player.stops == 3 && !s->host_on && !hv_virtio_snd_capture_requested(s));
+    s->backend = (HvVirtioSndBackend){0};
+}
+
 static void sound_test(HvPcie *pci) {
     HvVirtioSnd *s = hv_virtio_snd_create(&machine, pci);
     CHECK(s != NULL);
@@ -216,6 +282,7 @@ static void sound_test(HvPcie *pci) {
     CHECK(command(s, 0x104, 1, 0) == 0x8000);
     s->vio.pci.bar_write(&s->vio.pci, 4, 0x14, 0, 1);
     CHECK(!s->capture.running && s->capture.head == s->capture.tail && !s->running);
+    output_recovery(s);
     hv_virtio_snd_destroy(s);
 }
 
