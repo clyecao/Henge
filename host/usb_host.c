@@ -1,6 +1,7 @@
 #include "usb_host.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,9 +91,16 @@ static void print_string(HvVirtioUsb *d, uint8_t idx) {
     fprintf(stderr, "usb probe: string %u = \"%s\"\n", idx, s);
 }
 
+static pthread_t probe_thread;
+static int probe_started;
+static _Atomic int probe_stopping;
+
 static void *probe(void *arg) {
     HvVirtioUsb *d = arg;
-    int64_t s = hv_usb_wait_online(d, 120000);
+    int64_t s = -1;
+    for (int i = 0; i < 1200 && s < 0 && !probe_stopping; i++)
+        s = hv_usb_wait_online(d, 90);
+    if (probe_stopping) return NULL;
     fprintf(stderr, "usb probe: online (session %lld)\n", (long long)s);
     if (s < 0) return NULL;
     usleep(200000);
@@ -111,7 +119,14 @@ static void *probe(void *arg) {
 }
 
 void hv_usb_probe_start(HvVirtioUsb *d) {
-    pthread_t t;
-    pthread_create(&t, NULL, probe, d);
-    pthread_detach(t);
+    probe_stopping = 0;
+    probe_started = pthread_create(&probe_thread, NULL, probe, d) == 0;
+}
+
+void hv_usb_probe_stop(HvVirtioUsb *d) {
+    if (!probe_started) return;
+    probe_stopping = 1;
+    hv_vusb_set_online(d, 0);
+    pthread_join(probe_thread, NULL);
+    probe_started = 0;
 }

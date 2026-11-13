@@ -10,7 +10,9 @@
 
 #include "install.h"
 
+#include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,21 +26,24 @@ int usbmuxd_main(int argc, char **argv);
 static HvInstallProgress g_progress;
 static void *g_progress_user;
 static char g_ipsw[1024], g_cache[1024], g_mux[64];
+static char g_mux_config[PATH_MAX]; /* the daemon outlives each VM's disposable restore directory */
 static uint64_t g_ecid;
-static volatile int g_result = 1; /* 1 running, 0 done, < 0 failed */
+static _Atomic int restore_active, mux_running;
+static _Atomic int g_result = 1; /* 1 running, 0 done, < 0 failed */
 
 static void *mux_thread(void *arg) {
     (void)arg;
-    char *argv[] = {"usbmuxd", "-f", "-p", "-P", "NONE", "-S", g_mux, "-C", g_cache, NULL};
+    char *argv[] = {"usbmuxd", "-f", "-p", "-P", "NONE", "-S", g_mux, "-C", g_mux_config, NULL};
     int argc = 9;
     if (getenv("HV_INSTALL_LOG")) {
         static char *v[] = {"usbmuxd", "-f", "-v", "-v", "-p", "-P", "NONE", "-S", NULL, "-C", NULL, NULL};
-        v[8] = g_mux, v[10] = g_cache;
+        v[8] = g_mux, v[10] = g_mux_config;
         usbmuxd_main(11, v);
     } else {
         usbmuxd_main(argc, argv);
     }
     fprintf(stderr, "install: usbmuxd stopped\n");
+    atomic_store(&mux_running, 0);
     return NULL;
 }
 
@@ -52,6 +57,8 @@ static void *restore_thread(void *arg) {
     struct idevicerestore_client_t *c = idevicerestore_client_new();
     if (!c) {
         g_result = -1;
+        if (g_progress) g_progress(HV_INSTALL_FAILED, 0, g_progress_user);
+        atomic_store(&restore_active, 0);
         return NULL;
     }
     int flags = FLAG_ERASE;
@@ -66,29 +73,54 @@ static void *restore_thread(void *arg) {
     idevicerestore_client_free(c);
     g_result = r == 0 ? 0 : -1;
     if (g_progress) g_progress(r == 0 ? HV_INSTALL_DONE : HV_INSTALL_FAILED, 1.0, g_progress_user);
+    atomic_store(&restore_active, 0);
     return NULL;
 }
 
 int hv_install_start(HvVirtioUsb *usb, const char *ipsw, const char *workdir, uint64_t ecid, HvInstallProgress cb,
                      void *user) {
     if (!usb) return -1;
+    /* The device may have stopped before idevicerestore sends its last progress callback. */
+    if (atomic_exchange(&restore_active, 1)) return HV_INSTALL_BUSY;
     snprintf(g_ipsw, sizeof g_ipsw, "%s", ipsw);
     snprintf(g_cache, sizeof g_cache, "%s", workdir);
-    /* A private usbmuxd on loopback; the restore tools find it through this. */
-    int port = 27100 + (int)(getpid() % 800);
-    snprintf(g_mux, sizeof g_mux, "127.0.0.1:%d", port);
-    setenv("USBMUXD_SOCKET_ADDRESS", g_mux, 1);
     g_ecid = ecid;
     g_progress = cb;
     g_progress_user = user;
+    g_result = 1;
     hv_libusb_shim_attach(usb);
     pthread_t t;
-    if (pthread_create(&t, NULL, mux_thread, NULL) != 0) return -1;
-    pthread_detach(t);
-    usleep(300000);
-    if (pthread_create(&t, NULL, restore_thread, NULL) != 0) return -1;
+    /* usbmuxd runs for the rest of the launch: a second restore (HomeView's cloudOS, then the device) finds the
+       new machine through it as a device plugged in, rather than a second usbmuxd failing to take the port. */
+    if (!atomic_load(&mux_running)) {
+        if (!g_mux_config[0]) {
+            const char *tmp = getenv("TMPDIR");
+            if (snprintf(g_mux_config, sizeof g_mux_config, "%s/henge-usbmuxd-XXXXXX", tmp ? tmp : "/tmp") >= (int)sizeof g_mux_config ||
+                !mkdtemp(g_mux_config)) {
+                g_mux_config[0] = 0;
+                goto failed;
+            }
+        }
+        int port = 27100 + (int)(getpid() % 800);
+        snprintf(g_mux, sizeof g_mux, "127.0.0.1:%d", port);
+        setenv("USBMUXD_SOCKET_ADDRESS", g_mux, 1);
+        atomic_store(&mux_running, 1);
+        if (pthread_create(&t, NULL, mux_thread, NULL) != 0) {
+            atomic_store(&mux_running, 0);
+            goto failed;
+        }
+        pthread_detach(t);
+        usleep(300000);
+    }
+    if (pthread_create(&t, NULL, restore_thread, NULL) != 0) goto failed;
     pthread_detach(t);
     return 0;
+failed:
+    g_result = -1;
+    atomic_store(&restore_active, 0);
+    return -1;
 }
 
 int hv_install_result(void) { return g_result; }
+
+void hv_install_detach(void) { hv_libusb_shim_detach(); }

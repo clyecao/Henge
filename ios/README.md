@@ -89,8 +89,9 @@ I/O and interrupted-install recovery with `make test-install-disk-size`.
 Before sizing RAM, the native VM path releases unused virtual-address reservations
 for experimental Mac Apps. JIT's executable and writable mappings stay in place.
 Storage and contiguous-address shortages have separate errors; signed memory
-entitlements are logged. A previous installer or Mac Apps session that still owns
-resources requires quitting and reopening Henge before another install. Run
+entitlements are logged. The installer releases its USB port and RAM before the
+new Mac becomes available to start. After running a program in Mac Apps, reopen
+Henge before starting a VM. Run
 `make test-guest-memory test-vm-lifecycle` for memory budgets and repeated startup,
 failed boot/install cleanup, and suspend/resume checks. On-device boot and restore
 still need verification after signing with the intended profile.

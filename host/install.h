@@ -9,14 +9,17 @@
    2 upload filesystem, 3 verify, 4 flash firmware, ...), then one of these. */
 #define HV_INSTALL_DONE 100
 #define HV_INSTALL_FAILED 101
+#define HV_INSTALL_BUSY (-2)
 typedef void (*HvInstallProgress)(int step, double progress, void *user);
 
 /* Restore the IPSW onto the machine whose USB port is `usb` (an installer
    boot: the ROM in DFU mode). workdir holds the restore's scratch files.
-   Runs on its own threads; returns at once (0, or -1). */
+   Runs on its own threads. Returns 0, -1 on failure, or HV_INSTALL_BUSY while a previous restore finishes. */
 int hv_install_start(HvVirtioUsb *usb, const char *ipsw, const char *workdir, uint64_t ecid, HvInstallProgress cb,
                      void *user);
 /* 1 while running, 0 when it succeeded, -1 when it failed. */
 int hv_install_result(void);
+/* Before the machine is freed: the restore tools let go of its USB port (it looks unplugged to them). */
+void hv_install_detach(void);
 
 #endif

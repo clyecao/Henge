@@ -296,8 +296,6 @@ struct InstallView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("It did not work").font(.system(size: 22, weight: .bold))
             Text(text).font(.system(size: 15))
-            Text("Quit Henge (swipe it away) and open it again before trying again: only one Mac can start per launch.")
-                .font(.system(size: 13)).foregroundStyle(Desk.dim)
             Button("Back") { installer.reset() }.buttonStyle(DeskButtonStyle()).padding(.top, 6)
         }
         .padding(18)

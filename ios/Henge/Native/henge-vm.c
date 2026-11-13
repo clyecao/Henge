@@ -45,6 +45,16 @@ void henge_vm_set_identity(const char *soc_name, const char *product_name, const
     snprintf(identity_model, sizeof identity_model, "%s", model_id ? model_id : "");
 }
 
+/* An installer's machine: the restore tools (usbmuxd, idevicerestore) hold its USB port until detached. */
+static void release_machine(void) {
+    if (installer_session) {
+        hv_install_detach();
+        installer_session = 0;
+        fprintf(stderr, "henge: the restore tools let go of the installer's USB port\n");
+    }
+    hv_vm_destroy();
+}
+
 static void on_exit(int reason) {
     pthread_rwlock_wrlock(&api_lock);
     state = 3;
@@ -60,12 +70,12 @@ static void on_exit(int reason) {
     stopped_blocks = hv_vm_machine()->stats.blocks;
     stopped_tx = hv_net_tx_frames;
     stopped_rx = hv_net_rx_frames;
-    /* The restore stack owns separate USB workers for the installer session.
-       Normal guest sessions release everything before another boot is allowed. */
-    if (!installer_session) hv_vm_destroy();
+    /* The restore stack's USB workers let go of an installer's machine first (hv_install_detach); then it is
+       released like any other, so a device can start in this launch without quitting Henge. */
+    release_machine();
     state = 2;
-    fprintf(stderr, "henge: the machine stopped (%s, halt reason %d); CPU threads ended, disks flushed%s\n",
-            exit_description(), halt, installer_session ? "" : ", machine released");
+    fprintf(stderr, "henge: the machine stopped (%s, halt reason %d); CPU threads ended, disks flushed, machine released\n",
+            exit_description(), halt);
     pthread_rwlock_unlock(&api_lock);
 }
 
@@ -76,10 +86,8 @@ static int lock_start(char *err, size_t errlen) {
         return -1;
     }
     pthread_rwlock_wrlock(&api_lock);
-    if ((state != 0 && state != 2) || installer_session) {
-        snprintf(err, errlen, "%s", installer_session
-                 ? "The installer is still attached. Quit Henge and open it again before starting a Mac."
-                 : "The previous Mac is still running or finishing its shutdown.");
+    if (state != 0 && state != 2) {
+        snprintf(err, errlen, "The previous Mac is still running or finishing its shutdown.");
         pthread_rwlock_unlock(&api_lock);
         return -1;
     }
@@ -102,8 +110,8 @@ static int begin_start(char *err, size_t errlen) {
 }
 
 static int failed_start(void) {
-    if (!installer_session) hv_vm_destroy();
-    state = installer_session ? 2 : 0;
+    release_machine();
+    state = 0;
     pthread_rwlock_unlock(&api_lock);
     return -1;
 }
@@ -231,13 +239,13 @@ static int boot_or_resume(const char *rom, const char *disk, const char *aux, ui
     return started(err, errlen);
 }
 
-static volatile int install_step = -1;
-static volatile double install_progress;
+static _Atomic int install_step = -1;
+static _Atomic double install_progress;
 
 static void on_install_progress(int step, double p, void *user) {
     (void)user;
-    install_step = step;
     install_progress = p;
+    install_step = step;
     static int last = -1, lastpct = -1;
     int pct = (int)(p * 100);
     if (step != last || pct / 10 != lastpct / 10) {
@@ -261,8 +269,10 @@ int henge_vm_install(const char *rom, const char *disk, const char *aux, uint64_
     install_step = 0;
     install_progress = 0;
     installer_session = 1;
-    if (hv_install_start(hv_vm_board()->vusb, ipsw, workdir, ecid, on_install_progress, NULL) != 0) {
-        snprintf(err, errlen, "The installer could not start.");
+    int rc = hv_install_start(hv_vm_board()->vusb, ipsw, workdir, ecid, on_install_progress, NULL);
+    if (rc != 0) {
+        if (rc == HV_INSTALL_BUSY) installer_session = 0; /* this port was never attached */
+        snprintf(err, errlen, "%s", rc == HV_INSTALL_BUSY ? "The previous restore is finishing. Try again in a moment." : "The installer could not start.");
         return failed_start();
     }
     return started(err, errlen);
@@ -286,7 +296,7 @@ int henge_vm_state(void) { return state; }
 uint64_t henge_vm_generation(void) { return atomic_load(&generation); }
 int henge_vm_can_start(void) {
     pthread_rwlock_rdlock(&api_lock);
-    int ready = (state == 0 || state == 2) && !installer_session && !atomic_load(&henge_tl_ran);
+    int ready = (state == 0 || state == 2) && !atomic_load(&henge_tl_ran);
     pthread_rwlock_unlock(&api_lock);
     return ready;
 }

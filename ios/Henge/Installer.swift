@@ -145,7 +145,7 @@ final class Installer: NSObject, ObservableObject {
                 try await install(mac, ipsw: ipsw, cpus: cpus)
                 if !keepImage { try? FileManager.default.removeItem(at: ipsw) }
                 HengeLog.log("install", "\(name): installed \(release.name)")
-                phase = .done("\(release.name) is installed on \(name). Quit Henge (swipe it away) and open it again, then tap Start.")
+                phase = .done("\(release.name) is installed on \(name). Open Macs and tap Start.")
             } catch {
                 HengeLog.log("install", "failed: \(error.localizedDescription)")
                 // A half-installed Mac is no use, and its disk can be many gigabytes. The download stays.
@@ -252,27 +252,39 @@ final class Installer: NSObject, ObservableObject {
         let rc = henge_vm_install(mac.rom.path, mac.disk.path, mac.aux.path, mac.ecid, ipsw.path, work.path, ram, Int32(cpus),
                                   &buffer, buffer.count)
         if rc != 0 { throw message(String(cString: buffer)) }
-        while true {
-            try await Task.sleep(nanoseconds: 1_000_000_000)
-            step = Int(henge_install_step())
-            stepProgress = henge_install_progress()
-            if step == 100 { break }
-            if step == 101 { throw message("The restore failed. The log (Settings, or Documents/henge.log) says why.") }
-            if henge_vm_state() == 2 && step < 100 {
-                // The restore ends with the machine restarting, and idevicerestore finishes a
-                // little after; a stop with no result after that is a failure.
-                for _ in 0..<90 where henge_install_step() < 100 { try await Task.sleep(nanoseconds: 1_000_000_000) }
-                if henge_install_step() == 100 { break }
-                throw message("The machine stopped during the restore (\(String(cString: henge_vm_exit_reason()))).")
+        let generation = henge_vm_generation()
+        do {
+            while true {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                step = Int(henge_install_step())
+                stepProgress = henge_install_progress()
+                if step == 100 { break }
+                if step == 101 { throw message("The restore failed. The log (Settings, or Documents/henge.log) says why.") }
+                if henge_vm_state() == 2 && step < 100 {
+                    // The restore can report success a little after the guest restarts.
+                    for _ in 0..<90 where henge_install_step() < 100 { try await Task.sleep(nanoseconds: 1_000_000_000) }
+                    if henge_install_step() == 100 { break }
+                    throw message("The machine stopped during the restore (\(String(cString: henge_vm_exit_reason()))).")
+                }
             }
+        } catch {
+            await stopRestore(generation)
+            throw error
         }
-        // In the list before anything else: stopping the restore system can take a while, and if Henge is
-        // stopped meanwhile (the phone locked) a finished Mac must not be left on the disk unlisted.
+        // Preserve the installed Mac if iOS suspends Henge during cleanup. Offer Start once the port is free.
         try? (mac.osName ?? "").write(to: mac.directory.appendingPathComponent(Machines.installedMarker), atomically: true, encoding: .utf8)
+        await stopRestore(generation)
         Machines.shared.add(mac)
         HengeLog.log("install", "\(mac.name): restore finished, added to the Macs")
-        if henge_vm_state() == 1 { henge_vm_stop() }
         try? FileManager.default.removeItem(at: work)
+    }
+
+    private func stopRestore(_ generation: UInt64) async {
+        guard henge_vm_generation() == generation else { return }
+        if henge_vm_state() == 1 { henge_vm_stop() }
+        while henge_vm_generation() == generation && henge_vm_state() == 3 {
+            do { try await Task.sleep(nanoseconds: 50_000_000) } catch { return }
+        }
     }
 
     static func stepName(_ step: Int) -> String {

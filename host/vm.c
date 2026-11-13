@@ -337,6 +337,7 @@ void hv_vm_destroy(void) {
     hv_net_detach();
     net_on = 0;
     hv_audio_detach();
+    hv_usb_probe_stop(board.vusb);
     hv_vmapple_destroy(&board);
     hv_disk_close(&disk);
     hv_disk_close(&aux);

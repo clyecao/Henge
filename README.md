@@ -56,7 +56,7 @@ Then a Henge folder in the Mac's home folder is the same folder as Files › Hen
 - Graphics are tested on macOS's own apps, Chrome, Firefox, VS Code and Discord. Other apps may draw wrongly.
 - On macOS Sonoma, switching to a dynamic wallpaper (such as Sonoma) can stop the screen updating; opening any app brings it back. On Ventura, the Calendar icon in the Dock is missing its date.
 - For the first few minutes after you log in, macOS is busy starting up in the background, so apps open more slowly.
-- Only one Mac can start per launch. Quit Henge and open it again to start another, and to start one again after restarting or shutting down macOS.
+- One virtual Mac runs at a time. After installing or shutting down a Mac, you can start it or another Mac in the same Henge session.
 - iPadOS keeps some keyboard shortcuts for itself, such as Command-Tab.
 - It's emulation, so it runs slower than a real Mac.
 

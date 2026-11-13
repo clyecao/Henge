@@ -13,7 +13,7 @@ METAL_LIBS = -framework Foundation -framework QuartzCore -framework Metal -frame
 
 TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_mem \
         $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_dt_fixup $(B)/test_shutdown $(B)/test_jit_cache \
-        $(B)/test_encoding $(B)/test_undefined $(B)/test_pvg_surface $(B)/test_pvg_mapper $(B)/test_microphone
+        $(B)/test_encoding $(B)/test_undefined $(B)/test_pvg_surface $(B)/test_pvg_mapper $(B)/test_microphone $(B)/test_install_usb
 
 all: $(TESTS) $(B)/hengevm $(B)/hengevm-ref $(B)/hvsparse
 
@@ -104,6 +104,9 @@ test-encoding: $(B)/test_encoding
 .PHONY: test-encoding
 
 # Native app lifecycle with real devices and networking; no restore assets.
+$(B)/test_install_usb: tests/test_install_usb.c $(ENGINE) $(B)/libusb_shim.o $(B)/usb_host.o $(B)/virtio_usb.o $(B)/virtio.o $(B)/pcie.o $(B)/gicv3.o
+	$(CC) $(CFLAGS) -Ithird_party $^ -o $@
+
 $(B)/test_dns_lifecycle: tests/test_dns_lifecycle.c $(B)/dns_proxy.o
 	$(CC) $(CFLAGS) $^ -o $@
 
