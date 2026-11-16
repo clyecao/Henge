@@ -350,7 +350,12 @@ final class Machines: ObservableObject {
             HengeLog.log("machines", "machines.json (\(data.count) bytes) could not be read")
             return
         }
-        all = list.filter { FileManager.default.fileExists(atPath: $0.disk.path) }
+        all = list.filter { FileManager.default.fileExists(atPath: $0.disk.path) }.map { saved in
+            // The image may have been committed just before the app stopped, before machines.json was saved.
+            var mac = saved
+            mac.diskBytes = (try? FileManager.default.attributesOfItem(atPath: mac.disk.path)[.size] as? Int64) ?? mac.diskBytes
+            return mac
+        }
     }
 
     private func save() {
