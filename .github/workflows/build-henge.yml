@@ -42,7 +42,7 @@ jobs:
       - name: Test disk growth and Swift app integration
         working-directory: Henge
         run: |
-          make test-disk-growth test-identity test-jit-advice
+          make test-disk-growth test-install-disk-size test-guest-memory test-identity test-jit-advice
           bash ios/scripts/check_display.sh
 
       # fetch_deps.sh copies prebuilt pieces out of a BUILT Husk checkout:
@@ -67,12 +67,16 @@ jobs:
       - name: Install build tools
         run: |
           set -euxo pipefail
-          brew install xcodegen meson ninja pkg-config cmake
+          brew install xcodegen meson ninja pkg-config cmake libslirp
           # Runner images ship rustup; add the iOS target if it's missing.
           rustup target add aarch64-apple-ios || {
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             rustup target add aarch64-apple-ios
           }
+
+      - name: Test VM memory preparation and lifecycle
+        working-directory: Henge
+        run: make test-vm-lifecycle
 
       # build_ios.sh builds from third_party/build/<name>; the sources are
       # fetched by fetch_sources.sh, which Husk's own ci_build.sh runs first.

@@ -39,16 +39,26 @@ struct VirtualMac: Identifiable, Codable, Hashable {
 /// a file beside the disk: iOS's memory limit does not count a mapped file's pages either.
 enum GuestMemory {
     /// Points the engine at the file (it is unlinked as soon as it is open) and returns the size that fits.
-    static func prepare(_ mac: VirtualMac) -> UInt64 {
+    static func prepare(_ mac: VirtualMac, minimumMB: UInt64 = 1024) throws -> UInt64 {
+        var error = [CChar](repeating: 0, count: 256)
+        guard henge_vm_prepare_memory(&error, error.count) == 0 else {
+            throw NSError(domain: "Henge", code: 1, userInfo: [NSLocalizedDescriptionKey: String(cString: error)])
+        }
         let file = mac.directory.appendingPathComponent("ram.tmp")
         setenv("HV_RAM_FILE", file.path, 1)
         let free = (try? mac.directory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
-            .volumeAvailableCapacityForImportantUsage ?? 0
-        let room = free > 0 ? UInt64(max(free - (2 << 30), 0)) >> 20 : UInt64.max
+            .volumeAvailableCapacityForImportantUsage
         let reach = henge_largest_mapping_mb()
-        let ram = min(UInt64(mac.ramMB), room, reach > 512 ? reach - 512 : 0) / 512 * 512
-        HengeLog.log("session", "guest RAM \(ram) MB (asked \(mac.ramMB), disk room \(room), largest mapping \(reach))")
-        return ram
+        let budget = GuestMemoryBudget(requestedMB: UInt64(max(mac.ramMB, 0)), freeStorageBytes: free, largestMappingMB: reach)
+        HengeLog.log("session", "guest RAM \(budget.ramMB) MB (asked \(mac.ramMB), storage budget \(budget.storageMB), largest mapping after releasing reservations \(reach))")
+        HengeLog.log("session", "signed memory entitlements: extended addressing \(Entitlements.extendedAddressing), increased memory \(Entitlements.increasedMemory)")
+        if let reason = budget.refusal(minimumMB: minimumMB) {
+            let signingNote = budget.addressMB < minimumMB && !Entitlements.extendedAddressing
+                ? " This signed app lacks extended virtual addressing; check that your signing profile allows and preserves com.apple.developer.kernel.extended-virtual-addressing."
+                : ""
+            throw NSError(domain: "Henge", code: 1, userInfo: [NSLocalizedDescriptionKey: reason + signingNote])
+        }
+        return budget.ramMB
     }
 }
 
@@ -126,8 +136,9 @@ final class Machines: ObservableObject {
             if fm.fileExists(atPath: marker.path), let data = try? Data(contentsOf: item.appendingPathComponent("machine.json")),
                let info = try? JSONDecoder().decode(MachineFile.self, from: data),
                fm.fileExists(atPath: item.appendingPathComponent("disk.img").path) {
+                let diskBytes = (try? fm.attributesOfItem(atPath: item.appendingPathComponent("disk.img").path)[.size] as? NSNumber)?.int64Value ?? 0
                 var mac = VirtualMac(id: id, name: info.name ?? "Mac", ecid: info.ecid, seed: info.seed ?? 0,
-                                     ramMB: info.ramMB ?? Device.suggestedRAMGB * 1024, diskBytes: 64 << 30)
+                                     ramMB: info.ramMB ?? Device.suggestedRAMGB * 1024, diskBytes: diskBytes)
                 let os = (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 mac.osName = os.isEmpty ? nil : os
                 (mac.screenWidth, mac.screenHeight) = Device.fittingScreen

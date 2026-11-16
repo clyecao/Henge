@@ -520,7 +520,7 @@ static HengeDualMapping henge_ios_jit_allocate_real(size_t bytes);
  *   0x78-0x7C  Oilpan's unused lower half: V8's 8 GB at 0x78, the JIT region's writable view at 0x7A (not held,
  *              2.5 GB after it free for everything else), V8's TrustedRange at 0x7B (held)
  *   0x7C-0x80  Oilpan's upper half (its 32 GB reservation, aligned to 32, only uses this)
- * Let go when QEMU starts.
+ * Let go before a full VM sizes its RAM, or when QEMU starts.
  */
 #define HENGE_HIGH_BASE 0x7000000000ull
 #define HENGE_JIT_VIEW_AT 0x7A00000000ull
@@ -546,14 +546,21 @@ static void henge_ios_hold_high(void)
     }
 }
 
-static void henge_ios_release_high_hold(void)
+HENGE_EXPORT void henge_ios_release_high_hold(void)
 {
     if (g_high_hold_given) return;
+    uint64_t released = 0;
     for (int i = 0; i < 3; i++)
         if (g_high_hold[i]) {
-            vm_deallocate(mach_task_self(), g_high_hold[i], (vm_size_t)g_high_parts[i].bytes);
-            g_high_hold[i] = 0;
+            kern_return_t kr = vm_deallocate(mach_task_self(), g_high_hold[i], (vm_size_t)g_high_parts[i].bytes);
+            if (kr == KERN_SUCCESS) {
+                released += g_high_parts[i].bytes;
+                g_high_hold[i] = 0;
+            } else {
+                HENGE_LOG("could not release unused Mac-app reservation: %s", mach_error_string(kr));
+            }
         }
+    if (released) HENGE_LOG("released %llu MB of unused Mac-app address space for VM RAM", (unsigned long long)(released >> 20));
 }
 
 /* The held blocks, once, for the translation layer to place large reservations in (they stay held: those are mapped
@@ -999,6 +1006,7 @@ HengeDualMapping henge_ios_jit_allocate(size_t bytes)
     return henge_ios_jit_allocate_real(bytes);
 }
 int henge_ios_take_high_room(void **base, size_t *bytes) { (void)base, (void)bytes; return 0; }
+void henge_ios_release_high_hold(void) {}
 bool henge_ios_jit_prewarm(size_t bytes) { (void)bytes; return false; }
 bool henge_ios_jit_prewarm_self(size_t bytes) { (void)bytes; return false; }
 bool henge_ios_jit_reserve_bottom(size_t end) { (void)end; return true; }

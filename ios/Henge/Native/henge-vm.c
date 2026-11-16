@@ -69,8 +69,8 @@ static void on_exit(int reason) {
     pthread_rwlock_unlock(&api_lock);
 }
 
-/* Holds api_lock through creation so UI snapshots cannot see a partial board. */
-static int begin_start(char *err, size_t errlen) {
+/* Holds api_lock through preparation/creation so UI snapshots cannot see a partial board. */
+static int lock_start(char *err, size_t errlen) {
     if (atomic_load(&henge_tl_ran)) {
         snprintf(err, errlen, "A Mac app ran in this launch. Quit Henge (swipe it away) and open it again to start a Mac.");
         return -1;
@@ -83,7 +83,21 @@ static int begin_start(char *err, size_t errlen) {
         pthread_rwlock_unlock(&api_lock);
         return -1;
     }
+    return 0;
+}
+
+int henge_vm_prepare_memory(char *err, size_t errlen) {
+    if (lock_start(err, errlen)) return -1;
+    henge_ios_release_high_hold();
+    pthread_rwlock_unlock(&api_lock);
+    return 0;
+}
+
+static int begin_start(char *err, size_t errlen) {
+    if (lock_start(err, errlen)) return -1;
     state = 3;
+    // Native boot/install callers also need this; Henge uses the prewarmed JIT directly, bypassing QEMU's allocator.
+    henge_ios_release_high_hold();
     return 0;
 }
 
@@ -271,7 +285,7 @@ int henge_vm_state(void) { return state; }
 uint64_t henge_vm_generation(void) { return atomic_load(&generation); }
 int henge_vm_can_start(void) {
     pthread_rwlock_rdlock(&api_lock);
-    int ready = (state == 0 || state == 2) && !installer_session;
+    int ready = (state == 0 || state == 2) && !installer_session && !atomic_load(&henge_tl_ran);
     pthread_rwlock_unlock(&api_lock);
     return ready;
 }

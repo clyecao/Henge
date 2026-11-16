@@ -590,14 +590,14 @@ struct SessionView: View {
             error = "Wait for the disk to finish growing before starting a Mac."
             return
         }
-        UIApplication.shared.isIdleTimerDisabled = true
-        HardwareMouse.shared.start()
-        let ram = GuestMemory.prepare(mac)
-        HengeLog.log("session", "available memory \(henge_available_memory() >> 20) MB")
-        guard ram >= 1024 else {
-            error = "There is not room for this Mac's memory: it needs a few GB of free storage."
+        let ram: UInt64
+        do { ram = try GuestMemory.prepare(mac) } catch {
+            self.error = error.localizedDescription
             return
         }
+        UIApplication.shared.isIdleTimerDisabled = true
+        HardwareMouse.shared.start()
+        HengeLog.log("session", "available memory \(henge_available_memory() >> 20) MB")
         var buffer = [CChar](repeating: 0, count: 256)
         JITBootstrap.releaseLingeringDebugger()
         Sharing.prepare()

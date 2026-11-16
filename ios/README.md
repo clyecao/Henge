@@ -63,6 +63,23 @@ the packager as an environment variable (`HENGE_ENTITLEMENTS=... ios/scripts/pac
 - **Chips**: the virtual CPU offers Armv8.5 instructions (`core/sysreg.c`), which
   macOS uses and which run as they are, so Henge needs an A14 or M1 or newer.
 
+## Choosing a new Mac's disk
+
+The Install tab offers 64, 128, 256 and 512 GiB, defaulting to 128 GiB (upstream
+PR #127). Images are sparse: choosing a larger capacity does not allocate that
+much device storage or increase guest RAM. A recovered installation reads its
+capacity from the actual image. Test creation, sparse allocation, end-of-disk
+I/O and interrupted-install recovery with `make test-install-disk-size`.
+
+Before sizing RAM, the native VM path releases unused virtual-address reservations
+for experimental Mac Apps. JIT's executable and writable mappings stay in place.
+Storage and contiguous-address shortages have separate errors; signed memory
+entitlements are logged. A previous installer or Mac Apps session that still owns
+resources requires quitting and reopening Henge before another install. Run
+`make test-guest-memory test-vm-lifecycle` for memory budgets and repeated startup,
+failed boot/install cleanup, and suspend/resume checks. On-device boot and restore
+still need verification after signing with the intended profile.
+
 ## Growing a Mac's disk
 
 Stop the Mac, open its settings, and choose **Storage → Make the Disk Larger…**.

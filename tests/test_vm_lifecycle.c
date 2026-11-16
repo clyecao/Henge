@@ -19,7 +19,10 @@ static HvJitRegion jit;
 static HengeDualMapping mapping;
 static int failures;
 static _Atomic int reader_done;
+static int reservation_releases;
+extern _Atomic int henge_tl_ran;
 HengeDualMapping *henge_ios_jit_get_mapping(void) { return &mapping; }
+void henge_ios_release_high_hold(void) { reservation_releases++; }
 void hv_prof_ios_start(void) {}
 int hv_install_start(HvVirtioUsb *usb, const char *ipsw, const char *work, uint64_t ecid,
                      HvInstallProgress progress, void *user) {
@@ -90,6 +93,16 @@ int main(void) {
     write_file(aux, NULL, 1 << 20);
     mapping = (HengeDualMapping){.rx_addr = (uint8_t *)jit.base,
         .rw_addr = (uint8_t *)jit.base + jit.rw_diff, .size = jit.capacity * 4};
+    check("memory preflight succeeds before boot", henge_vm_prepare_memory(error, sizeof error) == 0);
+    check("memory preflight releases unused reservations", reservation_releases == 1);
+    check("memory preflight does not boot the VM", henge_vm_state() == 0 && henge_vm_can_start());
+    check("memory preflight preserves JIT", mapping.rx_addr == (uint8_t *)jit.base);
+    check("memory preflight can be repeated", henge_vm_prepare_memory(error, sizeof error) == 0);
+    atomic_store(&henge_tl_ran, 1);
+    int releases = reservation_releases;
+    check("Mac-app session refuses memory preflight", henge_vm_prepare_memory(error, sizeof error) != 0 && strstr(error, "Mac app"));
+    check("Mac-app reservations are not released", reservation_releases == releases && !henge_vm_can_start());
+    atomic_store(&henge_tl_ran, 0);
     pthread_t reader;
     if (pthread_create(&reader, NULL, read_ui, NULL)) return 1;
     /* Warm the process-wide pointer queue before counting worker threads. */
@@ -100,10 +113,19 @@ int main(void) {
     unsigned initial_dead_ports = dead_ports();
     /* Missing ROM fails after disks, RAM and device workers were created. */
     for (int i = 0; i < 3; i++) {
+        releases = reservation_releases;
         check("failed boot reports an error", henge_vm_boot(rom, disk, aux, 1, 0, 64, 4, error, sizeof error) != 0);
+        check("native boot releases unused reservations", reservation_releases == releases + 1);
         check("failed boot allows retry", henge_vm_state() == 0 && henge_vm_can_start());
         check("failed boot closes files", fds() == initial_fds);
         check("failed boot joins workers", threads() == initial_threads);
+        releases = reservation_releases;
+        check("failed install reports an error", henge_vm_install(rom, disk, aux, 1, "missing.ipsw", dir, 64, 4, error, sizeof error) != 0);
+        check("native install releases unused reservations", reservation_releases == releases + 1);
+        check("failed install allows retry", henge_vm_state() == 0 && henge_vm_can_start());
+        check("failed install releases RAM", hv_vm_board()->ram == NULL && hv_vm_board()->ram_fd == -1);
+        check("failed install closes files", fds() == initial_fds);
+        check("failed install joins workers", threads() == initial_threads);
     }
     for (int i = 0; i < 12; i++) {
         int outcome = i % 3 == 2 ? HENGE_VM_OUTCOME_HOST_STOP : i % 3 == 1 ? HENGE_VM_OUTCOME_RESTART : HENGE_VM_OUTCOME_SHUTDOWN;
@@ -115,6 +137,9 @@ int main(void) {
         check("boot succeeds without restarting app", rc == 0);
         if (rc) break;
         if (outcome == HENGE_VM_OUTCOME_HOST_STOP) {
+            releases = reservation_releases;
+            check("running VM refuses memory preflight", henge_vm_prepare_memory(error, sizeof error) != 0);
+            check("running VM keeps its reservations", reservation_releases == releases);
             henge_vm_mouse_button(0, 1);
             henge_vm_mouse_button(1, 1);
             henge_vm_mouse_move(5, 7);
@@ -151,6 +176,9 @@ int main(void) {
         rc = henge_vm_suspend(snap, "test", error, sizeof error);
         if (rc) fprintf(stderr, "suspend: %s\n", error);
         check("suspend saves", rc == 0 && henge_vm_state() == 4 && access(snap, F_OK) == 0);
+        releases = reservation_releases;
+        check("paused VM refuses memory preflight", henge_vm_prepare_memory(error, sizeof error) != 0);
+        check("paused VM keeps its reservations", reservation_releases == releases);
         volatile uint64_t *count = (volatile uint64_t *)hv_vm_board()->ram;
         uint64_t c1 = *count;
         usleep(20000);
@@ -205,6 +233,6 @@ int main(void) {
     pthread_join(reader, NULL);
     hv_jit_region_close(&jit);
     unlink(rom); unlink(disk); unlink(aux); rmdir(dir);
-    printf("VM lifecycle: 12 power cycles, 3 failed boots and a suspend/resume, %d failures\n", failures);
+    printf("VM lifecycle: memory preparation, 12 power cycles, 3 failed boots/installs and suspend/resume, %d failures\n", failures);
     return failures != 0;
 }

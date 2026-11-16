@@ -44,6 +44,9 @@ struct MacOSRelease: Identifiable, Hashable {
 @MainActor
 final class Installer: NSObject, ObservableObject {
     static let shared = Installer()
+    // Same choices as upstream PR #127; capacity is sparse, separate from guest RAM.
+    static let supportedDiskGiB = [64, 128, 256, 512]
+    static let defaultDiskGiB = 128
 
     enum Phase: Equatable {
         case idle
@@ -108,8 +111,18 @@ final class Installer: NSObject, ObservableObject {
         grace = .invalid
     }
 
-    func start(_ release: MacOSRelease, name: String, ramMB: Int, cpus: Int, keepImage: Bool) {
+    func start(_ release: MacOSRelease, name: String, ramMB: Int, cpus: Int, keepImage: Bool, diskGiB: Int) {
         guard !busy, Machines.shared.growing == nil else { return }
+        guard Self.supportedDiskGiB.contains(diskGiB) else {
+            phase = .failed("Unsupported disk size. Choose 64, 128, 256 or 512 GiB.")
+            return
+        }
+        // Report a retained installer or Mac app session before downloading or creating another disk.
+        var error = [CChar](repeating: 0, count: 256)
+        guard henge_vm_prepare_memory(&error, error.count) == 0 else {
+            phase = .failed(String(cString: error))
+            return
+        }
         phase = .checking
         machineName = name
         UIApplication.shared.isIdleTimerDisabled = true // the screen locking would suspend the download and the restore
@@ -125,7 +138,7 @@ final class Installer: NSObject, ObservableObject {
                 HengeLog.log("install", "boot ROM ready")
                 let ipsw = try await download(release)
                 phase = .preparing
-                var mac = try prepare(name: name, ramMB: ramMB, rom: rom)
+                var mac = try prepare(name: name, ramMB: ramMB, rom: rom, diskGiB: diskGiB)
                 mac.osName = release.name
                 made = mac
                 phase = .installing
@@ -193,25 +206,32 @@ final class Installer: NSObject, ObservableObject {
 
     // MARK: The new machine
 
-    private func prepare(name: String, ramMB: Int, rom: URL) throws -> VirtualMac {
+    private func prepare(name: String, ramMB: Int, rom: URL, diskGiB: Int) throws -> VirtualMac {
+        guard Self.supportedDiskGiB.contains(diskGiB) else { throw message("Unsupported disk size.") }
+        let capacity = Int64(diskGiB) << 30
         // A new machine identity, as VZMacMachineIdentifier makes one: a random ECID.
         let ecid = UInt64.random(in: 1 << 40 ..< 1 << 62)
-        var mac = VirtualMac(name: name, ecid: ecid, seed: 0, ramMB: ramMB, diskBytes: 64 << 30)
+        var mac = VirtualMac(name: name, ecid: ecid, seed: 0, ramMB: ramMB, diskBytes: capacity)
         (mac.screenWidth, mac.screenHeight) = Device.fittingScreen
         let fm = FileManager.default
         try fm.createDirectory(at: mac.directory, withIntermediateDirectories: true)
+        var prepared = false
+        defer { if !prepared { try? fm.removeItem(at: mac.directory) } }
         Machines.excludeFromBackup(Machines.root)
         try? fm.removeItem(at: mac.rom)
         try fm.copyItem(at: rom, to: mac.rom)
         guard fm.createFile(atPath: mac.disk.path, contents: nil) else { throw message("Cannot create the disk.") }
         let h = try FileHandle(forWritingTo: mac.disk)
-        try h.truncate(atOffset: UInt64(64) << 30) // sparse: blocks are only used as macOS writes them
+        defer { try? h.close() }
+        try h.truncate(atOffset: UInt64(capacity)) // sparse: blocks are only used as macOS writes them
         try h.close()
+        let diskSize = try fm.attributesOfItem(atPath: mac.disk.path)[.size] as? NSNumber
+        guard diskSize?.int64Value == capacity else { throw message("Could not create the selected disk size.") }
         guard henge_make_aux(mac.aux.path) == 0 else { throw message("Cannot create the auxiliary storage.") }
         let info: [String: Any] = ["name": name, "ecid": ecid, "seed": 0, "ramMB": ramMB]
         try JSONSerialization.data(withJSONObject: info).write(to: mac.directory.appendingPathComponent("machine.json"))
-        mac.diskBytes = 64 << 30
-        HengeLog.log("install", "new machine \(name): ECID \(ecid), 64 GB disk")
+        prepared = true
+        HengeLog.log("install", "new machine \(name): ECID \(ecid), \(diskGiB) GiB sparse disk")
         return mac
     }
 
@@ -224,8 +244,7 @@ final class Installer: NSObject, ObservableObject {
         // (it is outside Henge's footprint, so iOS does not stop it) stalls the whole phone two thirds of the way through.
         var restoring = mac
         restoring.ramMB = min(max(mac.ramMB, 2048), 4096)
-        let ram = GuestMemory.prepare(restoring)
-        guard ram >= 2048 else { throw message("Installing needs a few more GB of free storage for the Mac's memory.") }
+        let ram = try GuestMemory.prepare(restoring, minimumMB: 2048)
         setenv("HV_WRITE_CACHE", "0", 1) // the ~15 GB the restore writes goes straight to storage (host/disk.c); this process runs no other Mac
         let work = mac.directory.appendingPathComponent("restore", isDirectory: true)
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)

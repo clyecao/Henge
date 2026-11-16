@@ -284,3 +284,13 @@ $(B)/test_disk_growth: ios/Henge/DiskGrowth.swift tests/test_disk_growth.swift |
 test-disk-growth: $(B)/test_disk_growth
 	$(B)/test_disk_growth
 .PHONY: test-disk-growth
+
+$(B)/test_guest_memory: ios/Henge/GuestMemoryBudget.swift tests/test_guest_memory.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-guest-memory: $(B)/test_guest_memory
+	$(B)/test_guest_memory
+
+test-install-disk-size:
+	python3 tests/check_install_disk_size.py
+.PHONY: test-guest-memory test-install-disk-size

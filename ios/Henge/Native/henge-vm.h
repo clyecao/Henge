@@ -45,6 +45,9 @@ int henge_vm_state(void);
 /* A new generation starts with each successful boot, even in the same view. */
 uint64_t henge_vm_generation(void);
 int henge_vm_can_start(void);
+/* Validate that a VM may start and release unused Mac-app address reservations before measuring guest RAM.
+   Does not boot a VM or release its JIT region. 0, or -1 with a reason in err. */
+int henge_vm_prepare_memory(char *err, size_t errlen);
 /* Human-readable terminal reason, once state is 2. */
 const char *henge_vm_exit_reason(void);
 /* Terminal outcome after state == 2. Generic HALT alone does not prove a
