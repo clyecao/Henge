@@ -67,6 +67,7 @@ final class Machines: ObservableObject {
     @Published private(set) var all: [VirtualMac] = []
     @Published private(set) var importing: String?
     @Published var lastError: String?
+    @Published private(set) var growing: UUID?
 
     /// The files an exported machine folder holds; its disk is disk.img, or disk.img.hvsparse (tools/export_ios.sh packs it).
     static let required = ["AVPBooter.vmapple2.bin", "auxiliary.bin", "machine.json"]
@@ -108,6 +109,10 @@ final class Machines: ObservableObject {
 
     private func removeLeftovers() {
         removeOldTemporaryDownloads()
+        for mac in all {
+            // An interrupted disk grow only touched this working copy; disk.img is still a complete disk.
+            try? FileManager.default.removeItem(at: mac.directory.appendingPathComponent(DiskGrowth.temporaryName))
+        }
         if listUnreadable {
             HengeLog.log("machines", "the list of Macs could not be read: no machine folder is removed")
             return
@@ -152,7 +157,7 @@ final class Machines: ObservableObject {
     }
 
     private func collect() async {
-        guard importing == nil, let items = try? FileManager.default.contentsOfDirectory(at: Self.inbox, includingPropertiesForKeys: nil) else { return }
+        guard growing == nil, importing == nil, let items = try? FileManager.default.contentsOfDirectory(at: Self.inbox, includingPropertiesForKeys: nil) else { return }
         for folder in items where Self.hasDisk(folder) && Self.required.allSatisfy({ FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path) }) {
             await adopt(folder, move: true)
         }
@@ -168,6 +173,7 @@ final class Machines: ObservableObject {
     }
 
     private func adopt(_ folder: URL, move: Bool) async {
+        guard growing == nil else { return }
         do {
             let data = try Data(contentsOf: folder.appendingPathComponent("machine.json"))
             let info = try JSONDecoder().decode(MachineFile.self, from: data)
@@ -216,7 +222,7 @@ final class Machines: ObservableObject {
     /// in Documents/Exports, which the Files app can reach. Deleting Henge deletes that folder too,
     /// so it has to be moved out of Henge before a reinstall that replaces the app's data.
     func export(_ mac: VirtualMac) {
-        guard exporting == nil, importing == nil else { return }
+        guard growing == nil, exporting == nil, importing == nil else { return }
         exporting = mac.name
         exported = 0
         lastExport = nil
@@ -280,12 +286,43 @@ final class Machines: ObservableObject {
     }
 
     func update(_ mac: VirtualMac) {
+        guard growing != mac.id else { return }
         guard let i = all.firstIndex(where: { $0.id == mac.id }) else { return }
         all[i] = mac
+        all[i].diskBytes = (try? FileManager.default.attributesOfItem(atPath: mac.disk.path)[.size] as? Int64) ?? mac.diskBytes
         save()
     }
 
+    /// A clone keeps the original disk usable on failure. Copying recovery can take seconds, so keep it off the UI thread.
+    func growDisk(_ mac: VirtualMac, toGB gb: Int) async throws -> VirtualMac {
+        guard growing == nil, exporting == nil, importing == nil, !Installer.shared.busy else {
+            throw message("Wait for the current disk operation or installation to finish.")
+        }
+        guard henge_vm_can_start() != 0 else { throw message("Stop the Mac first. If an installation just finished, reopen Henge.") }
+        let current = (try FileManager.default.attributesOfItem(atPath: mac.disk.path)[.size] as? Int64) ?? mac.diskBytes
+        if let why = DiskGrowth.refusal(vmState: henge_vm_state(), currentBytes: current, newGB: gb) { throw message(why) }
+        guard all.contains(where: { $0.id == mac.id }) else { throw message("This Mac is no longer available.") }
+        growing = mac.id
+        lastError = nil
+        let idleTimerWasDisabled = UIApplication.shared.isIdleTimerDisabled
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer {
+            growing = nil
+            UIApplication.shared.isIdleTimerDisabled = idleTimerWasDisabled
+        }
+        let path = mac.disk.path, bytes = Int64(gb) << 30
+        let note = try await Task.detached(priority: .userInitiated) { try DiskGrowth.grow(path: path, to: bytes) }.value
+        InstantResume.discard(for: mac)
+        var grown = all.first(where: { $0.id == mac.id }) ?? mac
+        grown.diskBytes = bytes
+        if let i = all.firstIndex(where: { $0.id == mac.id }) { all[i] = grown }
+        save()
+        HengeLog.log("machines", "grew \(mac.name)'s disk to \(gb) GB (\(note))")
+        return grown
+    }
+
     func delete(_ id: UUID) {
+        guard growing == nil else { return }
         try? FileManager.default.removeItem(at: Self.directory(for: id))
         all.removeAll { $0.id == id }
         save()

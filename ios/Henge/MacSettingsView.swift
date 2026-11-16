@@ -7,6 +7,9 @@ struct MacSettingsView: View {
     @State private var mac: VirtualMac
     @State private var confirmDelete = false
     @State private var movingExport = false
+    @State private var growTo: Int?
+    @State private var growthError: String?
+    @State private var grewDisk = false
     @AppStorage("henge.cpus") private var cpus = 4
 
     init(mac: VirtualMac) { _mac = State(initialValue: mac) }
@@ -116,6 +119,31 @@ struct MacSettingsView: View {
                         Text("of \(ByteText.string(UInt64(max(mac.diskBytes, 0))))").font(.system(size: 16)).foregroundStyle(Desk.dim)
                     }
                     DeskBar(fraction: Double(mac.bytesUsed) / Double(max(mac.diskBytes, 1)))
+                    if machines.growing == mac.id {
+                        HStack {
+                            ProgressView()
+                            Text("Making the disk larger… Keep Henge open.").font(.system(size: 15))
+                        }
+                    } else {
+                        let sizes = DiskGrowth.choices(currentBytes: mac.diskBytes)
+                        if !sizes.isEmpty {
+                            Menu {
+                                ForEach(sizes, id: \.self) { gb in Button("\(gb) GB") { growTo = gb } }
+                            } label: {
+                                Text("Make the Disk Larger…")
+                                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(Desk.accentLight)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .disabled(machines.exporting != nil || machines.importing != nil)
+                        }
+                    }
+                    Text("After making the disk larger, start the Mac and run this in its Terminal to use the new space:")
+                        .font(.system(size: 13)).foregroundStyle(Desk.dim)
+                    Text(DiskGrowth.guestCommand)
+                        .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Copy Command") { UIPasteboard.general.string = DiskGrowth.guestCommand }
+                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(Desk.accentLight)
                 }
                 .padding(17)
                 .deskCard()
@@ -130,12 +158,45 @@ struct MacSettingsView: View {
         .background(Desk.page)
         .navigationTitle(mac.name)
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(machines.growing != nil)
+        .interactiveDismissDisabled(machines.growing != nil)
         .onDisappear(perform: save)
         .fileMover(isPresented: $movingExport, file: machines.lastExport) { result in
             switch result {
             case .success: machines.lastExport = nil
             case .failure(let error): machines.lastError = error.localizedDescription
             }
+        }
+        .confirmationDialog("Make the disk \(growTo ?? 0) GB?", isPresented: Binding(get: { growTo != nil }, set: { if !$0 { growTo = nil } }), titleVisibility: .visible) {
+            if let gb = growTo {
+                Button("Make It Larger") {
+                    growTo = nil
+                    save()
+                    Task {
+                        do {
+                            mac = try await machines.growDisk(mac, toGB: gb)
+                            grewDisk = true
+                        } catch {
+                            growthError = error.localizedDescription
+                            machines.lastError = error.localizedDescription
+                        }
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { growTo = nil }
+        } message: {
+            Text("Stop the Mac and back it up first. Disks can only grow. A successful resize discards the instant-resume save. Keep Henge open and leave free storage for moving the recovery partition. Then start the Mac and run: \(DiskGrowth.guestCommand)")
+        }
+        .alert("Could Not Make the Disk Larger", isPresented: Binding(get: { growthError != nil }, set: { if !$0 { growthError = nil } })) {
+            Button("OK", role: .cancel) { growthError = nil }
+        } message: {
+            Text(growthError ?? "")
+        }
+        .alert("Disk Is Larger", isPresented: $grewDisk) {
+            Button("Copy Command") { UIPasteboard.general.string = DiskGrowth.guestCommand }
+            Button("Done", role: .cancel) { }
+        } message: {
+            Text("Start the Mac and run this in its Terminal to finish: \(DiskGrowth.guestCommand)")
         }
         .confirmationDialog("Delete \(mac.name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete", role: .destructive) {

@@ -59,6 +59,7 @@ struct RootView: View {
                     .tag(Tab.settings)
             }
             .tint(Desk.accentLight)
+            .disabled(machines.growing != nil)
             if let running {
                 SessionView(mac: running) { self.running = nil }
                     .environment(\.colorScheme, .dark) // still dark while it fades out over a light page

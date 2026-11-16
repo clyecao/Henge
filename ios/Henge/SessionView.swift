@@ -586,6 +586,10 @@ struct SessionView: View {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         guard !Task.isCancelled else { return }
+        guard Machines.shared.growing == nil else {
+            error = "Wait for the disk to finish growing before starting a Mac."
+            return
+        }
         UIApplication.shared.isIdleTimerDisabled = true
         HardwareMouse.shared.start()
         let ram = GuestMemory.prepare(mac)

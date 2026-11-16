@@ -109,7 +109,7 @@ final class Installer: NSObject, ObservableObject {
     }
 
     func start(_ release: MacOSRelease, name: String, ramMB: Int, cpus: Int, keepImage: Bool) {
-        guard !busy else { return }
+        guard !busy, Machines.shared.growing == nil else { return }
         phase = .checking
         machineName = name
         UIApplication.shared.isIdleTimerDisabled = true // the screen locking would suspend the download and the restore

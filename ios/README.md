@@ -63,6 +63,31 @@ the packager as an environment variable (`HENGE_ENTITLEMENTS=... ios/scripts/pac
 - **Chips**: the virtual CPU offers Armv8.5 instructions (`core/sysreg.c`), which
   macOS uses and which run as they are, so Henge needs an A14 or M1 or newer.
 
+## Growing a Mac's disk
+
+Stop the Mac, open its settings, and choose **Storage → Make the Disk Larger…**.
+Available sizes are 96, 128, 192 and 256 GB; only sizes above the current capacity
+are offered. Back up the Mac first and keep Henge open until the operation finishes.
+Leave free storage for the recovery partition's moved blocks. Henge uses an APFS
+clone as a working copy, validates both GPT tables, moves trailing partitions, then
+atomically replaces the original. An interrupted or failed grow leaves the original
+disk intact; reopening Henge removes an interrupted working copy. Successful growth
+discards the instant-resume save. Running, paused, installing, importing or exporting
+Macs cannot be resized.
+
+Start the Mac and run this in its Terminal to let APFS use the added space:
+
+```sh
+sudo diskutil apfs resizeContainer disk0s2 0
+```
+
+The settings screen includes a **Copy Command** button. Shrinking and nonstandard
+partition layouts are unsupported. Run `make test-disk-growth` on macOS for GPT,
+partition relocation and failure-preservation tests; the GitHub Actions IPA workflow
+runs these tests and compiles the app before packaging. Hardware acceptance: grow a
+backed-up installed Mac, run the command inside the guest, check the new capacity
+and recovery volume, then reboot. These checks still require a real device.
+
 Code from Husk (GPL-2.0-or-later): `Henge/JIT/*`, `Henge/HengeLog.swift`,
 `Henge/Native/henge-ios-jit.*`, `henge-brk.S`, `HengeJITHelper/`. StikJIT is
 MPL-2.0 and idevice MIT (`Henge/Resources/legal/`); `tcg-apple-jit.h` is QEMU's

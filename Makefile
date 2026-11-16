@@ -275,3 +275,11 @@ $(B)/test_device_identity: ios/Henge/DeviceIdentity.swift tests/test_device_iden
 test-identity: $(B)/test_device_identity
 	$(B)/test_device_identity
 .PHONY: test-identity
+
+# Disk growth: GPT validation, recovery relocation, and preservation of the original on failure.
+$(B)/test_disk_growth: ios/Henge/DiskGrowth.swift tests/test_disk_growth.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-disk-growth: $(B)/test_disk_growth
+	$(B)/test_disk_growth
+.PHONY: test-disk-growth
