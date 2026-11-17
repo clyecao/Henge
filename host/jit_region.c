@@ -154,15 +154,18 @@ static size_t region_cap(const HvJitRegion *region) {
 
 /* Any thread: an even number of words (blocks stay 8-byte aligned), taken atomically. */
 uint32_t *hv_jit_reserve(HvJitRegion *region, size_t words) {
+    if (!words || words == SIZE_MAX) return NULL;
     words = (words + 1) & ~(size_t)1;
     size_t seg = region->seg_words;
     if (!seg) {
-        size_t at = __atomic_fetch_add(&region->used, words, __ATOMIC_RELAXED);
-        if (at + words > region_cap(region)) return NULL; /* full: the flush resets used */
+        size_t at = __atomic_load_n(&region->used, __ATOMIC_RELAXED), cap = region_cap(region);
+        do {
+            if (at > cap || words > cap - at) return NULL;
+        } while (!__atomic_compare_exchange_n(&region->used, &at, at + words, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
         return region->base + at;
     }
     if (words > seg) {
-        region->too_big = 1;
+        __atomic_store_n(&region->too_big, 1, __ATOMIC_RELAXED);
         return NULL;
     }
     /* Within one segment, so taking a segment back never splits a reservation (a CPU's chunk). */

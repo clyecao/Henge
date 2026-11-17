@@ -503,14 +503,10 @@ HvBlock *hv_block_at(HvMachine *m, const uint32_t *pc) {
         if (!len) continue;
         if (len > m->block_chunk) len = m->block_chunk;
         HvBlock *arr = &m->blocks[(size_t)c * m->block_chunk];
-        if (arr[0].code && arr[0].code > pc && (size_t)(arr[0].code - pc) > (1u << 18)) continue;
-        uint32_t lo = 0, hi = len - 1u;
-        while (lo < hi) {
-            uint32_t mid = (lo + hi + 1u) / 2u;
-            if (arr[mid].code && arr[mid].code <= pc) lo = mid;
-            else hi = mid - 1u;
-        }
-        if (arr[lo].code && arr[lo].code <= pc && (!best || arr[lo].code > best->code)) best = &arr[lo];
+        /* CPUs reserve code before publishing metadata, so publication order
+           need not be address order. This diagnostic lookup cannot binary-search it. */
+        for (uint32_t i = 0; i < len; i++)
+            if (arr[i].code && arr[i].code <= pc && (!best || arr[i].code > best->code)) best = &arr[i];
     }
     return best;
 }

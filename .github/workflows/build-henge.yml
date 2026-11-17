@@ -78,6 +78,14 @@ jobs:
         working-directory: Henge
         run: make test-vm-lifecycle
 
+      - name: Test engine and code-cache recycling
+        working-directory: Henge
+        run: |
+          set -euo pipefail
+          make test-engine
+          HV_JIT_SEGMENTS=1 build/test_jit
+          HV_JIT_SPLIT=1 HV_JIT_POISON=1 make test-code-cache
+
       # build_ios.sh builds from third_party/build/<name>; the sources are
       # fetched by fetch_sources.sh, which Husk's own ci_build.sh runs first.
       - name: Fetch Husk's third-party sources

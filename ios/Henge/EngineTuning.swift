@@ -16,6 +16,7 @@ enum EngineTuning {
         "HV_WFI_SPIN": "0",    // microseconds an idle CPU watches for work before sleeping
         "HV_FLUSH": "2",       // disk flush: F_BARRIERFSYNC, ordered but without a full fsync
         "HV_STATS": "10",      // seconds between engine stats lines in the log; 0 = off
+        "HV_JIT_SEGMENTS": "8", // reclaim one segment when full; 1 restores whole-cache recycling
     ]
 
     static func apply() {

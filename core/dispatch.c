@@ -70,8 +70,12 @@ void hv_flush_blocks(HvMachine *m) {
 void hv_evict_blocks(HvMachine *m) {
     HvJitRegion *r = &m->jit;
     if (!r->seg_words || r->too_big) {
+        int oversized = r->too_big;
         m->stats.flush_full++;
         hv_flush_blocks(m);
+        /* Recreating the same small segments cannot fit the failed reservation:
+           allow this full-cache cycle to use the whole region, or it retries forever. */
+        if (oversized) hv_jit_ring(r, 1);
         return;
     }
     uint64_t t0 = mach_absolute_time();
