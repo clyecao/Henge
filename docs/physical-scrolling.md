@@ -13,6 +13,22 @@ now permits 0.05–1.5. Existing saved settings remain effective. Each attached 
 owns its own previous-axis state and fractional motion; disconnect/session stop
 discards that state. Non-finite input is ignored before changing it.
 
+## Sustained scrolling
+
+Per-callback limits alone still allowed about 50 detents/second at sensitivity
+0.05 with a 125 Hz trackpad. The guest also uses event timing when applying
+[scroll acceleration](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDEventSystemPlugIns/IOHIDPointerScrollFilter.cpp).
+That explains why reducing each callback could improve a short swipe while a
+long swipe remained too fast; exact guest acceleration varies by configuration.
+
+Each axis now has a time-based output budget: `120 * sensitivity` detents/second,
+with an initial burst of `max(1, ceil(8 * sensitivity))`. At 0.05 this permits one
+initial detent plus at most six per elapsed second. Monotonic host uptime drives
+the budget, so extra callbacks or stale-axis updates cannot refill it early.
+Excess whole detents are discarded, with no timer or backlog to replay on release.
+Fractional movement still accumulates for precise short gestures. Lowering the
+slider immediately clamps the stored allowance as well as the refill rate.
+
 [Upstream PR #167](https://github.com/Leviidev/Henge/pull/167) takes a different
 approach: emulate two Magic Trackpad contacts, including lift, inertia and edge
 repositioning. This patch retains wheel events and the existing pointer-report
@@ -27,10 +43,14 @@ and `bash ios/scripts/check_display.sh`. The package workflow runs these checks.
 Scroll tests replay captured deltas, check small-motion accumulation, both axes,
 direction reversal, stale-axis filtering, separate devices, invalid values and
 speed bounds. The captured vertical sequence `0.017333984, 9.184784, 36.241714,
-51.288696, 0` now emits `0, -2, -2, -3, 0` detents at the default setting.
+51.288696, 0`, at its recorded intervals, emits `0, -2, -1, -1, 0` detents at the
+default setting. Ten-second traces at 30/60/125/1000 Hz check sustained output,
+and same-time bursts, clock anomalies and releases check that no excess is replayed.
 
 On iPad, compare slow and fast two-finger swipes in the same long macOS document
-at 0.3, then 0.1. Check horizontal scrolling, reverse scrolling and an ordinary
+at 0.3, then 0.05. At 0.05 compare a short swipe with a continuous ten-second
+swipe, and check that lifting does not trigger delayed scrolling. Check horizontal
+scrolling, reverse scrolling and an ordinary
 mouse wheel. Confirm the pointer stays still while scrolling, and repeat after
 disconnecting the input device or restarting the VM. Exact perceived speed still
 depends on the guest application's wheel handling and needs device validation.

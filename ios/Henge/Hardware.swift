@@ -270,7 +270,8 @@ final class HardwareMouse {
         let configured = defaults.object(forKey: ScrollSensitivity.key) == nil
             ? ScrollSensitivity.defaultValue : defaults.double(forKey: ScrollSensitivity.key)
         guard let wheel = scrolls[mouseID]?.consume(first: first, second: second,
-                                                   sensitivity: configured, reversed: reverse) else { return }
+                                                   sensitivity: configured, reversed: reverse,
+                                                   timestamp: ProcessInfo.processInfo.systemUptime) else { return }
         if scrollsLogged < 24 {
             scrollsLogged += 1
             HengeLog.log("input", "scroll raw: \(first), \(second); units: \(wheel.dx), \(wheel.dy)")
