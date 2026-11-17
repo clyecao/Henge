@@ -82,7 +82,9 @@ int main(void) {
             printf("small-cache machine init failed\n");
             return 1;
         }
-        small.jit.limit = 1024 / sizeof(uint32_t);
+        /* Full flushes reset the tuning limit, so reduce the logical capacity.
+           munmap still rounds this sub-page capacity to the mapped host page. */
+        small.jit.capacity = 1024 / sizeof(uint32_t);
         hv_jit_ring(&small.jit, 1);
         hv_machine_add_ram(&small, (uint64_t)(uintptr_t)jit_programs_begin, jit_programs_finish - jit_programs_begin,
                            (void *)jit_programs_begin, 1);
@@ -98,6 +100,10 @@ int main(void) {
             failed += bad != 0;
         }
         printf("with a 1 KB JIT region: %llu flushes\n", (unsigned long long)small.stats.block_flushes);
+        if (small.stats.block_flushes < 2) {
+            printf("small cache: expected repeated full flushes: FAIL\n");
+            failed++;
+        }
     }
     /* Again with the code cache a ring of two 32 KB segments (whatever HV_JIT_SEGMENTS says), the programs' pages
        invalidated after every round so they are translated again and the ring comes round about once a round:
