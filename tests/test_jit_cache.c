@@ -56,7 +56,9 @@ static void pressure(unsigned ncpu, unsigned segments) {
     if (segments > 1) {
         check("pressure causes segment eviction", machine.stats.evictions > 0);
         check("ring does not fall back to full flush", machine.stats.block_flushes == 0);
-        check("live incoming branches were detached", machine.stats.evict_unchained > 0);
+        /* A forward-only stream can evict every source before its target, so
+           it need not leave incoming chains. test_jit's cyclic workload checks
+           that live incoming chains are actually detached. */
     } else {
         check("legacy mode still fully flushes", machine.stats.block_flushes > 0 && !machine.stats.evictions);
     }

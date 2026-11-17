@@ -45,6 +45,14 @@ jobs:
           make test-disk-growth test-install-disk-size test-guest-memory test-identity test-jit-advice
           bash ios/scripts/check_display.sh
 
+      - name: Test engine and code-cache recycling
+        working-directory: Henge
+        run: |
+          set -euo pipefail
+          make test-engine
+          HV_JIT_SEGMENTS=1 build/test_jit
+          HV_JIT_SPLIT=1 HV_JIT_POISON=1 make test-code-cache
+
       # fetch_deps.sh copies prebuilt pieces out of a BUILT Husk checkout:
       # StikJIT.xcframework (vendored in Husk's repo, comes with checkout),
       # libhusk_rppairing.a (scripts/build_rppairing_ios.sh) and the
@@ -77,14 +85,6 @@ jobs:
       - name: Test VM memory preparation and lifecycle
         working-directory: Henge
         run: make test-vm-lifecycle
-
-      - name: Test engine and code-cache recycling
-        working-directory: Henge
-        run: |
-          set -euo pipefail
-          make test-engine
-          HV_JIT_SEGMENTS=1 build/test_jit
-          HV_JIT_SPLIT=1 HV_JIT_POISON=1 make test-code-cache
 
       # build_ios.sh builds from third_party/build/<name>; the sources are
       # fetched by fetch_sources.sh, which Husk's own ci_build.sh runs first.
