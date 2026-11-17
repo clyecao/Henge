@@ -23,7 +23,8 @@ static void pressure(unsigned ncpu, unsigned segments) {
     enum { hops = 2048, rounds = 3 };
     const uint64_t pa = 0x10000;
     uint32_t *code = aligned_alloc(16384, 32768);
-    if (!code || hv_machine_init(&machine, 128 << 10)) exit(1);
+    /* Each simple hop uses about 40 host bytes: 64 KiB cannot hold all 2048. */
+    if (!code || hv_machine_init(&machine, 64 << 10)) exit(1);
     hv_knob[HV_K_JITSEGS] = (int)segments;
     hv_jit_ring(&machine.jit, segments);
     code[0] = 0xd2800000; /* mov x0, #0 */
