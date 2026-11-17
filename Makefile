@@ -114,6 +114,13 @@ test-vm-lifecycle: $(B)/test_vm_lifecycle
 	$(B)/test_vm_lifecycle
 .PHONY: test-vm-lifecycle
 
+$(B)/test_mouse_reports: tests/test_mouse_reports.c $(ENGINE) $(DEV) $(B)/vm.o $(B)/dt_fixup.o $(B)/audio_mac.o $(B)/net_slirp.o $(B)/dns_proxy.o $(B)/share.o $(B)/usb_host.o
+	$(CC) $(CFLAGS) $^ $(SLIRP_LIBS) $(METAL_LIBS) -framework AudioToolbox -o $@
+
+test-mouse-reports: $(B)/test_mouse_reports
+	$(B)/test_mouse_reports
+.PHONY: test-mouse-reports
+
 $(B)/test_pvg_lifecycle: tests/test_pvg_lifecycle.m $(ENGINE) $(DEV)
 	$(CC) $(CFLAGS) -fobjc-arc $^ $(METAL_LIBS) -o $@
 

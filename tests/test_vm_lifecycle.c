@@ -143,7 +143,9 @@ int main(void) {
             henge_vm_mouse_button(0, 1);
             henge_vm_mouse_button(1, 1);
             henge_vm_mouse_move(5, 7);
+            henge_vm_mouse_scroll(12, -18);
             henge_vm_mouse_button(1, 0);
+            henge_vm_mouse_scroll(-8, 6);
             henge_vm_stop();
         }
         for (int n = 0; n < 3000 && henge_vm_state() != 2; n++) usleep(1000);
