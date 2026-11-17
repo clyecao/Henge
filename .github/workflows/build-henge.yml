@@ -45,13 +45,14 @@ jobs:
           make test-disk-growth test-install-disk-size test-guest-memory test-identity test-jit-advice
           bash ios/scripts/check_display.sh
 
-      - name: Test engine and code-cache recycling
+      - name: Test engine, instruction encodings and code-cache recycling
         working-directory: Henge
         run: |
           set -euo pipefail
           make test-engine
           HV_JIT_SEGMENTS=1 build/test_jit
           HV_JIT_SPLIT=1 HV_JIT_POISON=1 make test-code-cache
+          HV_JIT_SPLIT=1 HV_JIT_POISON=1 build/test_undefined
 
       # fetch_deps.sh copies prebuilt pieces out of a BUILT Husk checkout:
       # StikJIT.xcframework (vendored in Husk's repo, comes with checkout),

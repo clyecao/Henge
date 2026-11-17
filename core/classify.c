@@ -1,7 +1,18 @@
 #include "classify.h"
+#include "encoding_table.h"
 
 /* Decoding follows the A64 top-level encoding table in the Arm ARM:
    bits 28..25 pick the group, then each group is narrowed by mask and value. */
+
+/* Only while translating, never on a cache hit. The table validates opcode,
+   operand-size and reserved-bit combinations, not just the top-level group.
+   Its accepted native instructions are restricted to the Apple M1 baseline. */
+static HvInsnKind classify_copy(uint32_t insn) {
+    uint16_t node = HV_ENCODING_ROOT;
+    while (node > 1)
+        node = hv_encoding_nodes[node].child[(insn >> hv_encoding_nodes[node].bit) & 1];
+    return node ? HV_INSN_COPY : HV_INSN_UNDEFINED;
+}
 
 static HvInsnKind classify_hint(uint32_t insn) {
     /* HINT #imm: CRm in 11..8, op2 in 7..5. */
@@ -33,9 +44,11 @@ static HvInsnKind classify_system(uint32_t insn) {
         if (l == 0 && crn == 2 && op1 == 3 && (insn & 0x1f) == 0x1f) return classify_hint(insn);
         if (l == 0 && crn == 3 && op1 == 3 && (insn & 0x1f) == 0x1f) {
             uint32_t op2 = (insn >> 5) & 7;
-            /* CLREX, DSB, DMB, ISB, SB and the DSB nXS forms. */
-            (void)op2;
-            return HV_INSN_BARRIER;
+            /* CLREX, DSB, DMB, ISB; SB requires CRm=0. FEAT_XS (DSB nXS)
+               is not exposed. Never copy other reserved barrier encodings. */
+            if (op2 >= 2 && op2 <= 6 && op2 != 3) return HV_INSN_BARRIER;
+            if (op2 == 7 && ((insn >> 8) & 15) == 0) return HV_INSN_BARRIER;
+            return HV_INSN_UNDEFINED;
         }
         if (l == 0 && crn == 4) return HV_INSN_SYSREG; /* MSR (immediate) to PSTATE */
         if (l == 0 && crn == 1 && op1 == 3 && (insn & 0x1f) == 0x1f) {
@@ -84,7 +97,7 @@ static HvInsnKind classify_dp_register(uint32_t insn) {
     if ((insn & 0xffff0000) == 0xdac10000) return HV_INSN_PAC;
     /* PACGA: Data-processing (2 source), opcode 001100. */
     if ((insn & 0xffe0fc00) == 0x9ac03000) return HV_INSN_PAC;
-    return HV_INSN_COPY;
+    return classify_copy(insn);
 }
 
 HvInsnKind hv_classify(uint32_t insn) {
@@ -93,12 +106,12 @@ HvInsnKind hv_classify(uint32_t insn) {
     if ((op0 & 0xc) == 0x0) return HV_INSN_UNDEFINED;
     if ((op0 & 0xe) == 0x8) {                   /* 100x: data processing, immediate */
         if ((insn & 0x1f000000) == 0x10000000) return HV_INSN_PCREL;
-        return HV_INSN_COPY;
+        return classify_copy(insn);
     }
     if ((op0 & 0xe) == 0xa) return classify_branch_group(insn); /* 101x */
     if ((op0 & 0x5) == 0x4) return classify_memory(insn);       /* x1x0 */
     if ((op0 & 0x7) == 0x5) return classify_dp_register(insn);  /* x101 */
-    if ((op0 & 0x7) == 0x7) return HV_INSN_COPY;                /* x111: SIMD and FP */
+    if ((op0 & 0x7) == 0x7) return classify_copy(insn);         /* x111: SIMD and FP */
     return HV_INSN_UNDEFINED;
 }
 

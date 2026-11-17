@@ -12,7 +12,8 @@ ENGINE = $(CORE) $(HOST)
 METAL_LIBS = -framework Foundation -framework QuartzCore -framework Metal -framework IOSurface -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers
 
 TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_mem \
-        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_dt_fixup $(B)/test_shutdown $(B)/test_jit_cache
+        $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_dt_fixup $(B)/test_shutdown $(B)/test_jit_cache \
+        $(B)/test_encoding $(B)/test_undefined
 
 all: $(TESTS) $(B)/hengevm $(B)/hengevm-ref $(B)/hvsparse
 
@@ -91,6 +92,16 @@ $(B)/test_shutdown: tests/test_shutdown.c $(ENGINE)
 
 $(B)/test_jit_cache: tests/test_jit_cache.c $(ENGINE)
 	$(CC) $(CFLAGS) $^ -o $@
+
+$(B)/test_encoding: tests/test_encoding.c tests/invalid_encodings.h $(B)/classify.o
+	$(CC) $(CFLAGS) tests/test_encoding.c $(B)/classify.o -o $@
+
+$(B)/test_undefined: tests/test_undefined.c tests/invalid_encodings.h $(ENGINE)
+	$(CC) $(CFLAGS) tests/test_undefined.c $(ENGINE) -o $@
+
+test-encoding: $(B)/test_encoding
+	$(B)/test_encoding
+.PHONY: test-encoding
 
 # Native app lifecycle with real devices and networking; no restore assets.
 $(B)/test_dns_lifecycle: tests/test_dns_lifecycle.c $(B)/dns_proxy.o

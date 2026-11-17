@@ -10,6 +10,7 @@ the App Store.
 | Code from Husk | GPL-2.0-or-later | `ios/Henge/JIT/`, `HengeLog.swift`, `Native/henge-ios-jit.*`, `henge-brk.S`, `HengeJITHelper/` |
 | QEMU's vmapple AES device, as a reference | GPL-2.0-or-later | `devices/aes.c` |
 | QEMU's `tcg-apple-jit.h` | LGPL-2.1-or-later | `ios/Henge/Native/` |
+| VIXL encoding data and derived validator | BSD-3-Clause | `third_party/vixl/`, `core/encoding_table.h`; notice in `ios/Henge/Resources/legal/` |
 | usbmuxd | GPL-2.0 or GPL-3.0 | `third_party/usbmuxd` |
 | idevicerestore | LGPL (see below) | `third_party/idevicerestore` |
 | libimobiledevice, libplist | LGPL-2.1, with GPL-2.0 for their tools | `third_party/` |
