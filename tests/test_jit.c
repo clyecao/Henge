@@ -76,7 +76,14 @@ int main(void) {
        in the middle of a program, chains pending and all. */
     {
         static HvMachine small;
-        if (hv_machine_init(&small, 1024) != 0) return 1;
+        /* Split mappings require at least 4 KB. Keep a full host page mapped,
+           but expose only 1 KB to the allocator in either mapping mode. */
+        if (hv_machine_init(&small, 16 << 10) != 0) {
+            printf("small-cache machine init failed\n");
+            return 1;
+        }
+        small.jit.limit = 1024 / sizeof(uint32_t);
+        hv_jit_ring(&small.jit, 1);
         hv_machine_add_ram(&small, (uint64_t)(uintptr_t)jit_programs_begin, jit_programs_finish - jit_programs_begin,
                            (void *)jit_programs_begin, 1);
         hv_machine_add_ram(&small, (uint64_t)(uintptr_t)stack, 65536, stack, 0);
@@ -97,7 +104,10 @@ int main(void) {
        segments taken back in the middle of programs, with exits chained into their blocks from blocks that stay. */
     {
         static HvMachine ring;
-        if (hv_machine_init(&ring, 64 << 10) != 0) return 1;
+        if (hv_machine_init(&ring, 64 << 10) != 0) {
+            printf("ring-cache machine init failed\n");
+            return 1;
+        }
         hv_jit_ring(&ring.jit, 2);
         hv_machine_add_ram(&ring, (uint64_t)(uintptr_t)jit_programs_begin, jit_programs_finish - jit_programs_begin,
                            (void *)jit_programs_begin, 1);
