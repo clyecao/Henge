@@ -306,6 +306,14 @@ test-display-routing: $(B)/test_display_targets $(B)/test_display_router $(B)/te
 	$(B)/test_scene_manifest ios/Henge/Info.plist ios/Henge/ExternalDisplaySceneDelegate.swift
 .PHONY: test-display-routing
 
+# Physical trackpad/wheel sensitivity, captured deltas, axis filtering and bounds.
+$(B)/test_physical_mouse_scroll: ios/Henge/PhysicalMouseScroll.swift tests/test_physical_mouse_scroll.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-physical-mouse-scroll: $(B)/test_physical_mouse_scroll
+	$(B)/test_physical_mouse_scroll
+.PHONY: test-physical-mouse-scroll
+
 # What the JIT setup tells the user and when it retries by itself, for each kind of network path and helper error.
 $(B)/test_jit_advice: ios/Henge/JIT/JITNetworkAdvice.swift tests/test_jit_advice.swift | $(B)
 	xcrun --sdk macosx swiftc $^ -o $@

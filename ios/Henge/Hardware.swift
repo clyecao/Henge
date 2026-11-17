@@ -165,7 +165,6 @@ final class HardwareMouse {
     static let shared = HardwareMouse()
     static let speedKey = "henge.mouse.speed"
     static let reverseKey = "henge.mouse.reverse"
-    static let scrollSpeedKey = "henge.mouse.scrollSpeed"
 
     private var observers: [NSObjectProtocol] = []
     private var mice: [GCMouse] = []
@@ -175,7 +174,7 @@ final class HardwareMouse {
     private var speed: Float = 1
     private var reverse = false
     private var scrollsLogged = 0 // the first few, to see what a device's raw values look like
-    private var lastScrollFirst: Float = 0, lastScrollSecond: Float = 0
+    private var scrolls: [ObjectIdentifier: PhysicalMouseScroll] = [:]
 
     func start() {
         let defaults = UserDefaults.standard
@@ -186,8 +185,8 @@ final class HardwareMouse {
         buttons = PhysicalMouseButtons(swapsRightAndMiddle: swapButtons)
         buttonsLogged = 0
         HengeLog.log("input", "physical mouse: swap right/middle \(swapButtons ? "on" : "off")")
-        lastScrollFirst = 0
-        lastScrollSecond = 0
+        scrolls = scrolls.mapValues { _ in PhysicalMouseScroll() }
+        scrollsLogged = 0
         GCMouse.mice().forEach(attach)
         observers.append(NotificationCenter.default.addObserver(forName: .GCMouseDidConnect, object: nil, queue: .main) { [weak self] note in
             if let mouse = note.object as? GCMouse { self?.attach(mouse) }
@@ -195,6 +194,7 @@ final class HardwareMouse {
         observers.append(NotificationCenter.default.addObserver(forName: .GCMouseDidDisconnect, object: nil, queue: .main) { [weak self] note in
             guard let self, let mouse = note.object as? GCMouse else { return }
             self.releaseButtons()
+            self.scrolls.removeValue(forKey: ObjectIdentifier(mouse))
             self.mice.removeAll { $0 === mouse }
         })
         observers.append(NotificationCenter.default.addObserver(forName: UIPointerLockState.didChangeNotification, object: nil, queue: .main) { note in
@@ -220,6 +220,7 @@ final class HardwareMouse {
             input.scroll.valueChangedHandler = nil
         }
         mice.removeAll()
+        scrolls.removeAll()
     }
 
     func releaseButtons() {
@@ -229,12 +230,16 @@ final class HardwareMouse {
     private func attach(_ mouse: GCMouse) {
         guard let input = mouse.mouseInput, !mice.contains(where: { $0 === mouse }) else { return }
         mice.append(mouse)
+        let mouseID = ObjectIdentifier(mouse)
+        scrolls[mouseID] = PhysicalMouseScroll()
         HengeLog.log("input", "mouse: \(mouse.vendorName ?? "?"), right button \(input.rightButton != nil), middle \(input.middleButton != nil)")
         input.mouseMovedHandler = { [weak self] _, dx, dy in self?.moved(dx, dy) }
         input.leftButton.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(0, pressed) }
         input.rightButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(1, pressed) }
         input.middleButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(2, pressed) }
-        input.scroll.valueChangedHandler = { [weak self] _, first, second in self?.scrolled(first, second) }
+        input.scroll.valueChangedHandler = { [weak self] _, first, second in
+            self?.scrolled(first, second, from: mouseID)
+        }
     }
 
     /// GameController's Y runs upward. What doesn't make a whole step yet waits for the next move.
@@ -259,37 +264,17 @@ final class HardwareMouse {
     }
 
     /// GameController puts vertical motion on the first axis and horizontal on the second.
-    /// macOS accelerates wheel units roughly quadratically, so use a tunable square root
-    /// and cap each event to keep a small pad gesture from jumping across a page.
-    private func scrolled(_ first: Float, _ second: Float) {
-        // GameController reports both axis states when either one changes. On a
-        // Magic Keyboard it calls us twice per movement, with one stale axis in
-        // each call; sending both values doubles the scroll and adds sideways drift.
-        let verticalChanged = first != lastScrollFirst
-        let horizontalChanged = second != lastScrollSecond
-        lastScrollFirst = first
-        lastScrollSecond = second
-        let mostlyVertical = abs(first) > 2 * abs(second)
-        let mostlyHorizontal = abs(second) > 2 * abs(first)
-        let verticalRaw = verticalChanged && !mostlyHorizontal ? -first : 0
-        let horizontalRaw = horizontalChanged && !mostlyVertical ? second : 0
+    /// Accumulate fractional wheel units so slow finger movements remain controllable.
+    private func scrolled(_ first: Float, _ second: Float, from mouseID: ObjectIdentifier) {
         let defaults = UserDefaults.standard
-        let configured = defaults.object(forKey: Self.scrollSpeedKey) == nil
-            ? 0.3 : defaults.double(forKey: Self.scrollSpeedKey)
-        let scale = Float(configured.isFinite ? min(max(configured, 0.1), 1.5) : 0.3)
-        let way: Int32 = reverse ? -1 : 1
-        let horizontal = way * Self.wheelUnits(horizontalRaw, scale: scale)
-        let vertical = way * Self.wheelUnits(verticalRaw, scale: scale)
+        let configured = defaults.object(forKey: ScrollSensitivity.key) == nil
+            ? ScrollSensitivity.defaultValue : defaults.double(forKey: ScrollSensitivity.key)
+        guard let wheel = scrolls[mouseID]?.consume(first: first, second: second,
+                                                   sensitivity: configured, reversed: reverse) else { return }
         if scrollsLogged < 24 {
             scrollsLogged += 1
-            HengeLog.log("input", "scroll raw: \(first), \(second); units: \(horizontal), \(vertical)")
+            HengeLog.log("input", "scroll raw: \(first), \(second); units: \(wheel.dx), \(wheel.dy)")
         }
-        if horizontal != 0 || vertical != 0 { henge_vm_mouse_scroll(horizontal, vertical) }
-    }
-
-    private static func wheelUnits(_ value: Float, scale: Float) -> Int32 {
-        guard value.isFinite else { return 0 }
-        let units = Int32(min(32, (22 * scale * abs(value).squareRoot()).rounded()))
-        return value < 0 ? -units : units
+        if wheel.dx != 0 || wheel.dy != 0 { henge_vm_mouse_scroll(wheel.dx, wheel.dy) }
     }
 }

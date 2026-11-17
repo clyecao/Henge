@@ -42,7 +42,7 @@ jobs:
       - name: Test disk growth and Swift app integration
         working-directory: Henge
         run: |
-          make test-disk-growth test-install-disk-size test-guest-memory test-identity test-jit-advice
+          make test-disk-growth test-install-disk-size test-guest-memory test-identity test-jit-advice test-physical-mouse-scroll
           bash ios/scripts/check_display.sh
 
       - name: Test engine, instruction encodings and code-cache recycling
