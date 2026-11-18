@@ -6,6 +6,7 @@ struct SettingsView: View {
     @AppStorage(HardwareMouse.speedKey) private var mouseSpeed = 1.0
     @AppStorage(HardwareMouse.reverseKey) private var reverseScrolling = false
     @AppStorage(ScrollSensitivity.key) private var scrollSpeed = ScrollSensitivity.defaultValue
+    @AppStorage(TrackpadScrollSettings.key) private var trackpadScrollSpeed = TrackpadScrollSettings.defaultValue
     @AppStorage(VolumeClicks.inputModeKey) private var inputMode = VolumeClicks.InputMode.touchscreen
     @AppStorage(VolumeClicks.modeKey) private var volumeMode = VolumeClicks.Mode.delayHold
     @AppStorage(VolumeClicks.swapKey) private var swapButtons = false
@@ -71,9 +72,15 @@ struct SettingsView: View {
                         }
                         Toggle("Reverse scrolling", isOn: $reverseScrolling)
                         VStack(alignment: .leading, spacing: 4) {
-                            LabeledContent("Scroll speed", value: String(format: "%.2f×", scrollSpeed))
+                            LabeledContent("Mouse scroll speed", value: String(format: "%.2f×", scrollSpeed))
                             Slider(value: $scrollSpeed, in: ScrollSensitivity.range)
                         }
+                        VStack(alignment: .leading, spacing: 4) {
+                            LabeledContent("Trackpad scroll speed", value: String(format: "%.2f×", trackpadScrollSpeed))
+                            Slider(value: $trackpadScrollSpeed, in: ScrollSensitivity.range)
+                        }
+                        Text("Magic Keyboard and Magic Trackpad use smooth two-finger scrolling. Their scroll speed is separate from mouse wheels.")
+                            .font(.footnote).foregroundStyle(.secondary)
                         Toggle("Swap physical right and middle buttons", isOn: $swapMouseButtons)
                         Text("Only enable this if your physical mouse's right and middle buttons are reversed in the Mac. Touch controls stay unchanged. Restart the Mac session to apply.")
                             .font(.footnote).foregroundStyle(.secondary)

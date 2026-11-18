@@ -1,0 +1,209 @@
+import Foundation
+
+@main
+struct ScrollFingersTests {
+    static var checks = 0
+    static func check(_ condition: Bool, _ message: String) {
+        checks += 1
+        guard condition else { fatalError(message) }
+    }
+
+    struct Contact: Equatable { var x: Int32; var y: Int32 }
+    struct Event { var id: Int32; var phase: Int32; var point: Contact; var time: Double; var ts: UInt32 }
+    struct Frame { var contacts: [Int32: Contact]; var time: Double; var ts: UInt32 }
+
+    final class Pad {
+        var time = 100.0
+        var work: [(Double, DispatchWorkItem)] = []
+        var events: [Event] = []
+        var frames: [Frame] = []
+        var contacts: [Int32: Contact] = [:]
+        lazy var fingers = ScrollFingers(
+            touch: { [unowned self] id, phase, x, y, ts in
+                let point = Contact(x: x, y: y)
+                ScrollFingersTests.check((12...15).contains(id), "hardware IDs must not collide with touchscreen IDs")
+                if phase == 0 {
+                    ScrollFingersTests.check(self.contacts[id] == nil, "down must not duplicate an active ID")
+                    self.contacts[id] = point
+                } else if phase == 1 {
+                    ScrollFingersTests.check(self.contacts[id] != nil, "move needs a live contact")
+                    self.contacts[id] = point
+                } else {
+                    ScrollFingersTests.check(self.contacts.removeValue(forKey: id) != nil, "lift needs a live contact")
+                }
+                ScrollFingersTests.check(self.contacts.count <= 2, "at most one hardware pair may be active")
+                self.events.append(Event(id: id, phase: phase, point: point, time: self.time, ts: ts))
+            },
+            frame: { [unowned self] ts in
+                ScrollFingersTests.check(self.contacts.count == 2, "both fingers must move in one frame")
+                let points = self.contacts.values.sorted { $0.x < $1.x }
+                ScrollFingersTests.check(points[1].x - points[0].x == 1100 && points[1].y == points[0].y,
+                      "scroll must not become pinch or rotation")
+                for p in points {
+                    ScrollFingersTests.check(p.x >= 976 && p.x <= 7158 && p.y >= 780 && p.y <= 3645,
+                          "contacts must stay clear of edges and the thumb zone")
+                }
+                self.frames.append(Frame(contacts: self.contacts, time: self.time, ts: ts))
+            },
+            now: { [unowned self] in self.time },
+            schedule: { [unowned self] delay, item in self.work.append((self.time + delay, item)) })
+
+        func send(_ first: Float, _ second: Float = 0, speed: Double = 0.3, reverse: Bool = false) {
+            fingers.scroll(first: first, second: second, sensitivity: speed, reversed: reverse)
+        }
+
+        func advance(_ delta: Double) {
+            let end = time + delta
+            while let index = work.indices.min(by: { work[$0].0 < work[$1].0 }), work[index].0 <= end {
+                let (due, item) = work.remove(at: index)
+                time = max(time, due)
+                if !item.isCancelled { item.perform() }
+            }
+            time = end
+        }
+
+        func movement(_ frame: Frame) -> (Int32, Int32) {
+            let id = frame.contacts.keys.min()!
+            let start = events.last { $0.id == id && $0.phase == 0 && $0.ts <= frame.ts }!
+            return (frame.contacts[id]!.x - start.point.x, frame.contacts[id]!.y - start.point.y)
+        }
+    }
+
+    static func main() {
+        check(TrackpadScrollSettings.usesFingers(vendorName: "Magic Keyboard"), "user's keyboard must use contacts")
+        check(TrackpadScrollSettings.usesFingers(vendorName: "Apple Magic Trackpad 2"), "Apple trackpad must use contacts")
+        check(TrackpadScrollSettings.usesFingers(vendorName: "magic keyboard for iPad Pro"), "case-insensitive keyboard name")
+        let wheelNames: [String?] = [nil, "", "Bluetooth Mouse M558", "Magic Mouse", "USB Mouse"]
+        for name in wheelNames {
+            check(!TrackpadScrollSettings.usesFingers(vendorName: name), "mouse/unknown device must keep wheel path")
+        }
+        check(TrackpadScrollSettings.key != ScrollSensitivity.key, "trackpad speed must not overwrite mouse speed")
+        testMergeAndEnd()
+        testCancellation()
+        testSensitivity()
+        testLongSwipes()
+        print("PASS: smooth trackpad, \(checks) checks (routing, frames, idle, cancellation, edges, direction and bounds)")
+    }
+
+    static func testMergeAndEnd() {
+        let pad = Pad()
+        pad.send(1)
+        pad.advance(0.001)
+        pad.send(1, 0.5) // same sample's second callback: stale vertical axis
+        check(pad.events.isEmpty, "callbacks must merge before reporting")
+        pad.advance(0.003)
+        check(pad.frames.count == 1, "one merged frame per sample")
+        let motion = pad.movement(pad.frames[0])
+        check(motion.0 == -20 && motion.1 == -40, "stale axis must not double movement")
+        pad.send(1, 0.5)
+        pad.advance(0.004)
+        check(pad.frames.count == 1, "duplicate callback must not move again")
+        pad.send(0, 0)
+        check(pad.contacts.isEmpty, "zero sample must lift both fingers")
+        let count = pad.events.count
+        pad.advance(0.3)
+        check(pad.events.count == count, "ended gesture must not fire delayed work")
+
+        let quick = Pad()
+        quick.send(1)
+        quick.advance(0.001)
+        quick.send(0)
+        check(quick.frames.count == 1 && quick.contacts.isEmpty, "quick release must flush one pending move then lift")
+        quick.advance(0.3)
+        check(quick.frames.count == 1, "quick release must cancel scheduled flush")
+
+        let idle = Pad()
+        idle.send(1)
+        idle.advance(0.119)
+        check(idle.contacts.count == 2, "do not lift early")
+        idle.advance(0.002)
+        check(idle.contacts.isEmpty, "missing zero sample must idle-lift")
+        idle.send(1) // same value must work after idle; no stale previous-axis state
+        idle.advance(0.004)
+        check(Set(idle.contacts.keys) == Set([Int32(12), 13]), "next gesture must use the other ID pair")
+        idle.fingers.cancel()
+
+        let delayed = Pad()
+        delayed.send(1)
+        delayed.time += 0.05 // simulate a busy main queue before the scheduled flush
+        delayed.advance(0)
+        check(delayed.frames[0].ts == 100000, "a delayed flush must retain the captured sample time")
+        delayed.fingers.cancel()
+    }
+
+    static func testCancellation() {
+        let pad = Pad()
+        pad.send(1)
+        pad.advance(0.001)
+        pad.fingers.cancel()
+        pad.send(2)
+        pad.advance(0.0025)
+        check(pad.frames.isEmpty, "old timer must not flush the new gesture early")
+        pad.advance(0.001)
+        check(pad.frames.count == 1, "new gesture must have its own timer")
+        pad.send(3)
+        pad.fingers.cancel()
+        check(pad.contacts.isEmpty, "disconnect/session stop must lift both contacts")
+        let count = pad.events.count
+        pad.advance(1)
+        check(pad.events.count == count, "cancel must discard pending motion and idle work")
+        pad.fingers.cancel()
+        check(pad.events.count == count, "repeated cleanup must be idempotent")
+    }
+
+    static func testSensitivity() {
+        for reverse in [false, true] {
+            for speed in [0.05, 0.3, 1.5] {
+                let pad = Pad()
+                pad.send(1, speed: speed, reverse: reverse)
+                pad.advance(0.004)
+                let delta = pad.movement(pad.frames[0]).1
+                check((delta > 0) == reverse, "reverse setting must reverse contact travel")
+                check(abs(Double(abs(delta)) - 40 * speed / 0.3) <= 1, "speed must scale physical travel")
+                pad.fingers.cancel()
+            }
+        }
+        let invalid = Pad()
+        invalid.send(.nan)
+        invalid.send(1, .infinity)
+        invalid.advance(0.004)
+        check(invalid.events.isEmpty, "invalid values must not create contacts")
+        invalid.send(1, speed: .nan)
+        invalid.advance(0.004)
+        check(invalid.movement(invalid.frames[0]).1 == -40, "invalid speed must use default")
+        invalid.fingers.cancel()
+    }
+
+    static func testLongSwipes() {
+        for extreme in [false, true] {
+            let pad = Pad()
+            for i in 0..<300 {
+                let raw: Float = extreme ? (i.isMultiple(of: 2) ? .greatestFiniteMagnitude : .greatestFiniteMagnitude / 2)
+                                        : (i.isMultiple(of: 2) ? 6 : 7)
+                pad.send(raw)
+                pad.advance(0.008)
+            }
+            let lifts = pad.events.filter { $0.phase == 2 }
+            check(lifts.count >= 4, "long swipe must regrip and keep moving")
+            for event in lifts {
+                let preceding = pad.frames.filter { $0.time <= event.time && $0.contacts[event.id] != nil }
+                guard let last = preceding.last else { fatalError("lift without a frame") }
+                let stationary = preceding.reversed().prefix { $0.contacts == last.contacts }
+                check(last.time - stationary.last!.time >= 0.049,
+                      "edge lift must follow at least 50 ms of stationary frames")
+            }
+            let count = pad.frames.count
+            for i in 0..<40 {
+                pad.send(i.isMultiple(of: 2) ? -6 : -7)
+                pad.advance(0.008)
+            }
+            let reversed = pad.frames.dropFirst(count)
+            check(reversed.contains { pad.movement($0).1 > 0 }, "direction change must recover after edge rest")
+            pad.send(0)
+            check(pad.contacts.isEmpty, "long-swipe release must lift contacts")
+            let eventCount = pad.events.count
+            pad.advance(1)
+            check(pad.events.count == eventCount, "edge backlog must not replay after release")
+        }
+    }
+}

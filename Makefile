@@ -314,6 +314,13 @@ test-physical-mouse-scroll: $(B)/test_physical_mouse_scroll
 	$(B)/test_physical_mouse_scroll
 .PHONY: test-physical-mouse-scroll
 
+$(B)/test_scroll_fingers: ios/Henge/PhysicalMouseScroll.swift ios/Henge/ScrollFingers.swift tests/test_scroll_fingers.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-scroll-fingers: $(B)/test_scroll_fingers
+	$(B)/test_scroll_fingers
+.PHONY: test-scroll-fingers
+
 # What the JIT setup tells the user and when it retries by itself, for each kind of network path and helper error.
 $(B)/test_jit_advice: ios/Henge/JIT/JITNetworkAdvice.swift tests/test_jit_advice.swift | $(B)
 	xcrun --sdk macosx swiftc $^ -o $@

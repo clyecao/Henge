@@ -55,6 +55,8 @@ struct Trackpad: UIViewRepresentable {
 
         required init?(coder: NSCoder) { fatalError("made in code") }
 
+        deinit { HardwareMouse.shared.setTouchscreenActive(false, source: ObjectIdentifier(self)) }
+
         /// Where the finger is on the pad's sensor, in its units.
         private func sensor(_ t: UITouch) -> (Int32, Int32) {
             let p = t.location(in: self)
@@ -80,6 +82,7 @@ struct Trackpad: UIViewRepresentable {
             let touches = touches.filter { $0.type != .indirectPointer }
             guard !touches.isEmpty else { return }
             if fingers.isEmpty {
+                HardwareMouse.shared.setTouchscreenActive(true, source: ObjectIdentifier(self))
                 started = Date()
                 travelled = 0
                 mostFingers = 0
@@ -142,6 +145,7 @@ struct Trackpad: UIViewRepresentable {
             let ts = Self.ms(touches.map(\.timestamp).max() ?? 0)
             for id in lifted { henge_vm_touch(id, 2, 0, 0, ts) }
             guard fingers.isEmpty else { return } /* fingers still down: the gesture goes on */
+            HardwareMouse.shared.setTouchscreenActive(false, source: ObjectIdentifier(self))
             /* The whole gesture is over. */
             if tapsClick {
                 cancelHold()
