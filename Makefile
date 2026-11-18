@@ -335,8 +335,12 @@ test-physical-mouse-scroll: $(B)/test_physical_mouse_scroll
 $(B)/test_jit_advice: ios/Henge/JIT/JITNetworkAdvice.swift tests/test_jit_advice.swift | $(B)
 	xcrun --sdk macosx swiftc $^ -o $@
 
-test-jit-advice: $(B)/test_jit_advice
+$(B)/test_jit_shortcut: ios/Henge/TurnOnJITIntent.swift ios/Henge/JIT/JITLaunchRequest.swift tests/test_jit_shortcut.swift | $(B)
+	xcrun --sdk macosx swiftc -target "$$(uname -m)-apple-macos14.0" $^ -o $@
+
+test-jit-advice: $(B)/test_jit_advice $(B)/test_jit_shortcut
 	$(B)/test_jit_advice
+	$(B)/test_jit_shortcut
 .PHONY: test-jit-advice
 
 # The host identity table and the icon-snapping for the guest's About This Mac.

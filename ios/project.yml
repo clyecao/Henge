@@ -103,6 +103,7 @@ targets:
           - "-framework"
           - "UniformTypeIdentifiers"
     dependencies:
+      - sdk: AppIntents.framework
       # Built-in StikJIT's debugger process. Embedded into PlugIns/.
       - target: HengeJITHelper
     preBuildScripts:

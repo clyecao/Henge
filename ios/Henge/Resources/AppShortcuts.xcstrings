@@ -1,0 +1,22 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "Turn on JIT in ${applicationName}" : {
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "translated",
+            "values" : ["Turn on JIT in ${applicationName}"]
+          }
+        },
+        "zh-Hans" : {
+          "stringSet" : {
+            "state" : "translated",
+            "values" : ["在 ${applicationName} 中启用 JIT"]
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.1"
+}

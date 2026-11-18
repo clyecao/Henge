@@ -151,35 +151,29 @@ final class JITCoordinator: ObservableObject {
     /// Only when StikJIT can do it unattended -- it is available here and already paired -- so opening Henge never lands in
     /// the setup walkthrough by surprise.
     static let autoEnableKey = "henge.jit.autoEnable"
-    private var autoTried = false
+    private var launchRequest = JITLaunchRequest.idle
 
     /// A Henge TrollStore installed asks TrollStore for JIT each time it opens without it (#135), unless turned off in Settings:
     /// TrollStore attaches to the running Henge for a moment, with nothing to tap.
     static let trollStoreAutoKey = "henge.jit.trollStoreAuto"
     static var trollStoreAuto: Bool { UserDefaults.standard.object(forKey: trollStoreAutoKey) as? Bool ?? true }
 
-    /// JIT at launch opened LocalDevVPN to connect it; the next return to the foreground goes on with the built-in helper.
-    private var awaitingVPN = false
-
     func enableAtLaunchIfAsked() {
-        if awaitingVPN {
-            awaitingVPN = false
+        if launchRequest.finishVPNHandoff() {
             guard !JITBootstrap.ready else { return }
             log("back from LocalDevVPN (\(LocalDevVPN.isConnected ? "connected" : "not connected")): turning JIT on with built-in StikJIT")
             method = .builtIn
             enable()
             return
         }
-        if !autoTried, JITBootstrap.isInstalledWithTrollStore, Self.trollStoreAuto {
-            autoTried = true
+        if launchRequest.takeAutomaticRequest(if: JITBootstrap.isInstalledWithTrollStore && Self.trollStoreAuto) {
             guard !JITBootstrap.ready else { return }
             log("installed by TrollStore: asking it for JIT at launch")
             method = .trollStore
             enable()
             return
         }
-        guard !autoTried, UserDefaults.standard.bool(forKey: Self.autoEnableKey) else { return }
-        autoTried = true
+        guard launchRequest.takeAutomaticRequest(if: UserDefaults.standard.bool(forKey: Self.autoEnableKey)) else { return }
         guard !JITBootstrap.ready else { return }
         guard HengeBuiltInJIT.isAvailable, hasPairing else {
             log("JIT at launch is on, but built-in StikJIT is not available or not paired; skipped")
@@ -189,8 +183,12 @@ final class JITCoordinator: ObservableObject {
         // connects and comes back (henge://), and the return to the foreground goes on above.
         if LocalDevVPN.isInstalled, !LocalDevVPN.isConnected {
             log("JIT at launch: LocalDevVPN is not connected; opening it to connect")
-            awaitingVPN = true
-            LocalDevVPN.open()
+            launchRequest = .waitingForVPN
+            LocalDevVPN.open { [weak self] opened in
+                guard let self, !opened, self.launchRequest.finishVPNHandoff() else { return }
+                error = "LocalDevVPN could not open. Connect it and try again."
+                showSetup = true
+            }
             return
         }
         log("turning JIT on at launch with built-in StikJIT")
@@ -199,7 +197,9 @@ final class JITCoordinator: ObservableObject {
     }
 
     func enable() {
-        guard !JITBootstrap.ready else { return }
+        // A shortcut can arrive on either side of the first active scene callback.
+        // Let a pending VPN handoff finish, and count an explicit request as this launch's attempt.
+        guard launchRequest.takeExplicitRequest(), !JITBootstrap.ready else { return }
         // Turn On JIT while JIT is already being turned on (at launch, by itself) started a second helper, which attached
         // once the first let go and then stayed: with a debugger on, every trap stops Henge until it answers, and the
         // phone ran process spawns 2x and a shell loop 1.5x slower (2026-11-09).
@@ -522,10 +522,10 @@ enum LocalDevVPN {
     }
     static var actionTitle: String { isInstalled ? "Connect LocalDevVPN" : "Get LocalDevVPN" }
 
-    @MainActor static func open() {
+    @MainActor static func open(completion: (@MainActor @Sendable (Bool) -> Void)? = nil) {
         let installed = isInstalled
         HengeLog.log("jit", "LocalDevVPN \(installed ? "connect" : "app-store")")
-        UIApplication.shared.open(installed ? connect : appStore)
+        UIApplication.shared.open(installed ? connect : appStore, options: [:], completionHandler: completion)
     }
 }
 

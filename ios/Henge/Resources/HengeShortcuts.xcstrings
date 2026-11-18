@@ -1,0 +1,26 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "Open Henge and request JIT using the method selected in Settings." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "打开 Henge，并使用设置中选定的方式请求启用 JIT。"
+          }
+        }
+      }
+    },
+    "Turn On JIT" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启用 JIT"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}
