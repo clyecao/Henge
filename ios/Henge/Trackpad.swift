@@ -55,7 +55,13 @@ struct Trackpad: UIViewRepresentable {
 
         required init?(coder: NSCoder) { fatalError("made in code") }
 
-        deinit { HardwareMouse.shared.setTouchscreenActive(false, source: ObjectIdentifier(self)) }
+        deinit {
+            holdTimer?.invalidate()
+            let ts = Self.ms(ProcessInfo.processInfo.systemUptime)
+            for finger in fingers { henge_vm_touch(finger.id, 2, 0, 0, ts) }
+            if holding { henge_vm_mouse_button(0, 0) }
+            HardwareMouse.shared.setTouchscreenActive(false, source: ObjectIdentifier(self))
+        }
 
         /// Where the finger is on the pad's sensor, in its units.
         private func sensor(_ t: UITouch) -> (Int32, Int32) {
