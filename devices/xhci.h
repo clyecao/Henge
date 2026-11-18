@@ -100,6 +100,9 @@ void hv_xhci_touch(HvXhci *x, int id, int phase, int px, int py, uint32_t ts_ms)
 /* Any thread: send one frame with every finger's current state (ends a move batch),
    stamped with the touch sample's own clock (ms). */
 void hv_xhci_touch_frame(HvXhci *x, uint32_t ts_ms);
+/* Magic Keyboard scroll uses pairs 12/13 and 14/15. Both contacts change in one
+   report. Returns zero when a start/move should be skipped under backpressure. */
+int hv_xhci_scroll_pair(HvXhci *x, int first_id, int phase, int left, int right, int y, uint32_t ts_ms);
 /* Any thread: the pad's full press (a click), down or up. */
 void hv_xhci_touch_button(HvXhci *x, int down);
 /* CPU thread: hand waiting reports to the guest. */

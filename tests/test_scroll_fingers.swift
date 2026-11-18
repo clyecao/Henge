@@ -18,33 +18,33 @@ struct ScrollFingersTests {
         var events: [Event] = []
         var frames: [Frame] = []
         var contacts: [Int32: Contact] = [:]
+        var acceptMoves = true
+        var summaries: [(Int, Int)] = []
         lazy var fingers = ScrollFingers(
-            touch: { [unowned self] id, phase, x, y, ts in
-                let point = Contact(x: x, y: y)
-                ScrollFingersTests.check((12...15).contains(id), "hardware IDs must not collide with touchscreen IDs")
-                if phase == 0 {
-                    ScrollFingersTests.check(self.contacts[id] == nil, "down must not duplicate an active ID")
-                    self.contacts[id] = point
-                } else if phase == 1 {
-                    ScrollFingersTests.check(self.contacts[id] != nil, "move needs a live contact")
-                    self.contacts[id] = point
-                } else {
-                    ScrollFingersTests.check(self.contacts.removeValue(forKey: id) != nil, "lift needs a live contact")
+            report: { [unowned self] first, phase, left, right, y, ts in
+                if !self.acceptMoves && phase == .move { return false }
+                ScrollFingersTests.check(first == 12 || first == 14, "hardware IDs must not collide with touchscreen IDs")
+                ScrollFingersTests.check(right - left == 1100, "scroll must not become pinch or rotation")
+                for (id, x) in [(first, left), (first + 1, right)] {
+                    let point = Contact(x: x, y: y)
+                    if phase == .down {
+                        ScrollFingersTests.check(self.contacts[id] == nil, "down must not duplicate an active ID")
+                        self.contacts[id] = point
+                    } else if phase == .move {
+                        ScrollFingersTests.check(self.contacts[id] != nil, "move needs a live contact")
+                        self.contacts[id] = point
+                    } else {
+                        ScrollFingersTests.check(self.contacts.removeValue(forKey: id) != nil, "lift needs a live contact")
+                    }
+                    self.events.append(Event(id: id, phase: phase.rawValue, point: point, time: self.time, ts: ts))
+                    ScrollFingersTests.check(x >= 976 && x <= 7158 && y >= 780 && y <= 3645,
+                                              "contacts must stay clear of edges and the thumb zone")
                 }
-                ScrollFingersTests.check(self.contacts.count <= 2, "at most one hardware pair may be active")
-                self.events.append(Event(id: id, phase: phase, point: point, time: self.time, ts: ts))
+                ScrollFingersTests.check(self.contacts.count == (phase == .up ? 0 : 2), "both contacts must change together")
+                if phase == .move { self.frames.append(Frame(contacts: self.contacts, time: self.time, ts: ts)) }
+                return true
             },
-            frame: { [unowned self] ts in
-                ScrollFingersTests.check(self.contacts.count == 2, "both fingers must move in one frame")
-                let points = self.contacts.values.sorted { $0.x < $1.x }
-                ScrollFingersTests.check(points[1].x - points[0].x == 1100 && points[1].y == points[0].y,
-                      "scroll must not become pinch or rotation")
-                for p in points {
-                    ScrollFingersTests.check(p.x >= 976 && p.x <= 7158 && p.y >= 780 && p.y <= 3645,
-                          "contacts must stay clear of edges and the thumb zone")
-                }
-                self.frames.append(Frame(contacts: self.contacts, time: self.time, ts: ts))
-            },
+            onEnd: { [unowned self] in self.summaries.append(($0, $1)) },
             now: { [unowned self] in self.time },
             schedule: { [unowned self] delay, item in self.work.append((self.time + delay, item)) })
 
@@ -83,6 +83,8 @@ struct ScrollFingersTests {
         testCapturedMagicKeyboardSwipe()
         testCancellation()
         testSensitivity()
+        testBackpressure()
+        testRegripDistance()
         testLongSwipes()
         print("PASS: smooth trackpad, \(checks) checks (routing, frames, idle, cancellation, edges, direction and bounds)")
     }
@@ -256,6 +258,27 @@ struct ScrollFingersTests {
         invalid.fingers.cancel()
     }
 
+    static func testBackpressure() {
+        let pad = Pad()
+        // The first inputs from the a701934 iPad log, followed by a stalled
+        // endpoint. The first accepted delta afterwards must stand on its own.
+        for value: Float in [0.094070435, 0.31396484, 0.25686646, 0.40930176, 0.44511414] {
+            pad.send(value)
+            pad.advance(0.008)
+        }
+        let before = pad.frames.last!.contacts[14]!
+        pad.acceptMoves = false
+        for _ in 0..<30 { pad.send(0.6); pad.advance(0.008) }
+        pad.acceptMoves = true
+        pad.send(-0.25)
+        pad.advance(0.008)
+        check(pad.frames.count == 6 && pad.frames.last!.contacts[14]!.y - before.y == 10,
+              "resume from the last accepted position using only the new reversed motion")
+        pad.send(0)
+        pad.advance(0.02)
+        check(pad.contacts.isEmpty && pad.summaries.last?.1 == 30, "gesture must lift cleanly after rejected frames")
+    }
+
     static func testLongSwipes() {
         for extreme in [false, true] {
             let pad = Pad()
@@ -270,9 +293,12 @@ struct ScrollFingersTests {
             for event in lifts {
                 let preceding = pad.frames.filter { $0.time <= event.time && $0.contacts[event.id] != nil }
                 guard let last = preceding.last else { fatalError("lift without a frame") }
-                let stationary = preceding.reversed().prefix { $0.contacts == last.contacts }
-                check(last.time - stationary.last!.time >= 0.049,
-                      "edge lift must follow at least 50 ms of stationary frames")
+                check(preceding.count >= 3, "regrip needs a deceleration history")
+                let previous = preceding[preceding.count - 2]
+                check(last.contacts == previous.contacts, "lift must follow a stationary sample")
+                check(abs(previous.contacts[event.id]!.y - preceding[preceding.count - 3].contacts[event.id]!.y) <= 2,
+                      "the last moving sample before the lift must be slow")
+                check(event.time - previous.time < 0.025, "no fixed 50 ms hold at the edge")
             }
             let count = pad.frames.count
             for i in 0..<40 {
@@ -290,6 +316,26 @@ struct ScrollFingersTests {
             let eventCount = pad.events.count
             pad.advance(1)
             check(pad.events.count == eventCount, "edge backlog must not replay after release")
+        }
+    }
+
+    static func testRegripDistance() {
+        for horizontal in [false, true] {
+            let pad = Pad()
+            for _ in 0..<200 {
+                pad.send(horizontal ? 0 : 4, horizontal ? 4 : 0)
+                pad.advance(0.008)
+                if pad.events.last?.phase == 2 { break }
+            }
+            check(pad.events.last?.phase == 2, "a sustained swipe must regrip")
+            for _ in 0..<2 {
+                pad.send(horizontal ? 0 : 0.125, horizontal ? 0.125 : 0)
+                pad.advance(0.008)
+            }
+            let (dx, dy) = pad.movement(pad.frames.last!)
+            check(horizontal ? (dx == -5 && dy == 0) : (dy == -5 && dx == 0),
+                  "a small input after a regrip must not repay earlier fast motion")
+            pad.fingers.cancel()
         }
     }
 }

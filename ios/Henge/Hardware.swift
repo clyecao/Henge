@@ -173,14 +173,18 @@ final class HardwareMouse {
     private var restX: Float = 0, restY: Float = 0
     private var speed: Float = 1
     private var reverse = false
-    private var wheelLogs = 0, trackpadLogs = 0
+    private var wheelLogs = 0, trackpadLogs = 0, trackpadSummaries = 0
     private var scrolls: [ObjectIdentifier: PhysicalMouseScroll] = [:]
     private var trackpads: Set<ObjectIdentifier> = []
     private var smoothDevice: ObjectIdentifier?
     private var touchscreenOwners: Set<ObjectIdentifier> = []
-    private let scrollFingers = ScrollFingers(
-        touch: { henge_vm_touch($0, $1, $2, $3, $4) },
-        frame: { henge_vm_touch_frame($0) })
+    private lazy var scrollFingers = ScrollFingers(
+        report: { henge_vm_scroll_pair($0, $1.rawValue, $2, $3, $4, $5) != 0 },
+        onEnd: { [weak self] regrips, skipped in
+            guard let self, self.trackpadSummaries < 24 else { return }
+            self.trackpadSummaries += 1
+            HengeLog.log("input", "trackpad gesture: regrips=\(regrips) skipped_reports=\(skipped)")
+        })
 
     func start() {
         let defaults = UserDefaults.standard
@@ -194,6 +198,7 @@ final class HardwareMouse {
         scrolls = scrolls.mapValues { _ in PhysicalMouseScroll() }
         wheelLogs = 0
         trackpadLogs = 0
+        trackpadSummaries = 0
         GCMouse.mice().forEach(attach)
         observers.append(NotificationCenter.default.addObserver(forName: .GCMouseDidConnect, object: nil, queue: .main) { [weak self] note in
             if let mouse = note.object as? GCMouse { self?.attach(mouse) }

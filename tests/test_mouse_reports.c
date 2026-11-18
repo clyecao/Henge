@@ -100,6 +100,39 @@ static void verify_reports(HvVirtioInput *mouse) {
     pthread_mutex_unlock(&mouse->mu);
 }
 
+/* Leave the USB endpoint unpolled to model a guest that stops posting INs. */
+static void verify_scroll_pair(HvXhci *usb) {
+    check("paired down", hv_xhci_scroll_pair(usb, 14, 0, 3500, 4600, 2100, 100));
+    check("paired move", hv_xhci_scroll_pair(usb, 14, 1, 3500, 4600, 2080, 108));
+    for (int i = 0; i < 80; i++)
+        check("slow endpoint rejects more motion", !hv_xhci_scroll_pair(usb, 14, 1, 3500, 4600, 1800, 116 + i * 8));
+    check("two accepted reports only", usb->tp_rtail - usb->tp_rhead == 2);
+    check("rejected motion does not advance the device", usb->tp_fingers[0].y == 2080 && usb->tp_ts == 108);
+    for (uint32_t i = usb->tp_rhead; i != usb->tp_rtail; i++) {
+        unsigned at = i % HV_TP_REPORTS;
+        const uint8_t *r = usb->tp_reports[at];
+        check("complete two-contact report", usb->tp_rlen[at] == 30 && (r[20] & 15) == 14 && (r[29] & 15) == 15);
+        check("both contacts active", r[15] >> 5 == 4 && r[24] >> 5 == 4);
+    }
+    check("pair can release even under pressure", hv_xhci_scroll_pair(usb, 14, 2, 0, 0, 0, 800));
+    unsigned stop = (usb->tp_rtail - 2) % HV_TP_REPORTS, empty = (usb->tp_rtail - 1) % HV_TP_REPORTS;
+    check("both contacts stop in the same report", usb->tp_rlen[stop] == 30 &&
+          usb->tp_reports[stop][15] >> 5 == 7 && usb->tp_reports[stop][24] >> 5 == 7);
+    check("release ends with an empty pad", usb->tp_rlen[empty] == 12 && usb->tp_reports[empty][7] == 2);
+    check("next pair waits for capacity", !hv_xhci_scroll_pair(usb, 12, 0, 3500, 4600, 3000, 808));
+    usb->tp_rhead = usb->tp_rtail;
+    check("fresh pair after drain", hv_xhci_scroll_pair(usb, 12, 0, 3500, 4600, 3000, 816));
+    check("old IDs cannot move new pair", !hv_xhci_scroll_pair(usb, 14, 1, 3500, 4600, 2900, 824));
+    check("late lift cannot cancel new pair", !hv_xhci_scroll_pair(usb, 14, 2, 0, 0, 0, 825));
+    usb->tp_rhead = usb->tp_rtail;
+    check("start on resume releases a stale pair first", !hv_xhci_scroll_pair(usb, 14, 0, 3500, 4600, 3000, 832));
+    usb->tp_rhead = usb->tp_rtail;
+    check("resumed gesture can start", hv_xhci_scroll_pair(usb, 14, 0, 3500, 4600, 3000, 840));
+    for (int i = 0; i < HV_TP_REPORTS; i++) hv_xhci_touch_frame(usb, 848 + i);
+    check("full shared queue keeps pair release", hv_xhci_scroll_pair(usb, 14, 2, 0, 0, 0, 920));
+    check("last queued report clears all contacts", usb->tp_rlen[(usb->tp_rtail - 1) % HV_TP_REPORTS] == 12);
+}
+
 int main(void) {
     alarm(20);
     char dir[] = "/tmp/henge-mouse-XXXXXX", rom[256], disk[256], aux[256], ram[256], error[256];
@@ -120,6 +153,7 @@ int main(void) {
     check("create input devices without booting macOS", rc == 0);
     if (rc) fprintf(stderr, "%s\n", error);
     else {
+        verify_scroll_pair(hv_vm_board()->usb);
         hv_vm_mouse_move(13, -7);
         hv_vm_mouse_wheel(3);
         hv_vm_mouse_hwheel(-2);

@@ -54,14 +54,16 @@ and momentum. They bypass the wheel conversion and rate limit above.
   teardown, input-source changes or touchscreen contact; touchscreen and hardware
   fingers must not combine into a three/four-finger gesture.
 - Alternate finger pairs 14/15 and 12/13, outside the touchscreen's 1–5.
-- At the pad edge, hold still for at least 50 ms before lifting. Reposition and
-  resume movement on separate samples, avoiding an instantaneous new flick.
+- Reduce finger travel over the last few samples approaching a pad edge. Send
+  one stationary report before lifting and start the next pair on a fresh sample.
+  Reversing direction while approaching the edge moves the current pair back.
 - At default speed, cap virtual finger travel at 7,200 sensor units per second.
   Scale the cap with the slider and sample interval (up to 33 ms). This keeps
   accelerated input from exhausting the sensor in the first few frames of a swipe.
-- Bound frame travel and held motion, discard held motion on release, and clear
-  opposing held motion when direction reverses. Huge input cannot stall at an edge
-  forever or create unlimited delayed travel.
+- Submit each pair's placement, movement and stop as complete two-contact USB
+  reports. At two pending reports, skip new motion and keep the last accepted
+  position. The next sample applies only its own displacement. Lifts still reach
+  the queue. The gesture log counts regrips and skipped reports.
 
 Settings and session details now show **Mouse scroll speed** (existing saved
 setting) and **Trackpad scroll speed** (new `henge.trackpad.scrollSpeed` preference,
@@ -81,7 +83,7 @@ default setting. Ten-second traces at 30/60/125/1000 Hz check sustained output,
 and same-time bursts, clock anomalies and releases check that no excess is replayed.
 The smooth-scroll tests use a controlled clock and scheduler to check device
 routing, merged two-contact frames, speed/direction, idle lift, canceled timers,
-long-swipe edge rests, alternating IDs and extreme input bounds. They also replay
+edge deceleration, alternating IDs, delayed USB consumption and extreme input bounds. They also replay
 97 ms of Magic Keyboard input from an iPad14,6 and check that every sample
 advances both contacts without a regrip.
 

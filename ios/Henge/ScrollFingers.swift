@@ -16,26 +16,23 @@ enum TrackpadScrollSettings {
 /// as two contacts on the guest's Magic Trackpad 2, letting macOS do pixel
 /// scrolling and momentum. Only one hardware pad owns these IDs at a time.
 final class ScrollFingers {
-    typealias Touch = (Int32, Int32, Int32, Int32, UInt32) -> Void
+    enum Phase: Int32 { case down, move, up }
+    typealias Report = (Int32, Phase, Int32, Int32, Int32, UInt32) -> Bool
     typealias Schedule = (TimeInterval, DispatchWorkItem) -> Void
-    private let touch: Touch
-    private let commitFrame: (UInt32) -> Void
+    private let report: Report
+    private let onEnd: (Int, Int) -> Void
     private let now: () -> TimeInterval
     private let schedule: Schedule
 
-    private static let pairs: [(Int32, Int32)] = [(14, 15), (12, 13)]
+    private var firstID: Int32 = 14
     private static let minX = 8134.0 * 0.12, maxX = 8134.0 * 0.88
     private static let minY = 5206.0 * 0.15, maxY = 5206.0 * 0.70
     private static let spread = 1100.0
-    private static let mergeDelay = 0.003, idleLift = 0.12, rest = 0.05
+    private static let mergeDelay = 0.003, idleLift = 0.12
     // Allow a zero between adjacent ~8 ms trackpad reports without lifting.
     private static let releaseDelay = 0.016
-    // A malformed/very large delta must not leave the pad permanently at an
-    // edge. Also bound held motion so long swipes cannot build an unbounded debt.
-    private static let maxStep = 900.0, maxBacklog = 1800.0
+    private static let maxStep = 900.0
 
-    private var pair = 0
-    private var ids: (Int32, Int32) { Self.pairs[pair] }
     private var down = false
     private var x = 0.0, y = 0.0
     private var lastSample: TimeInterval?
@@ -44,19 +41,19 @@ final class ScrollFingers {
     private var zeroTime: TimeInterval?
     private var pendingX = 0.0, pendingY = 0.0
     private var pendingTime: TimeInterval?
-    private var backlogX = 0.0, backlogY = 0.0
-    private var restingUntil: TimeInterval?
+    private var quietEdge = false
+    private var regrips = 0, skipped = 0
     private var needsPlacement = false
     private var flushWork: DispatchWorkItem?, idleWork: DispatchWorkItem?
     private var generation: UInt64 = 0
 
-    init(touch: @escaping Touch, frame: @escaping (UInt32) -> Void,
+    init(report: @escaping Report, onEnd: @escaping (Int, Int) -> Void = { _, _ in },
          now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          schedule: @escaping Schedule = { delay, work in
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          }) {
-        self.touch = touch
-        self.commitFrame = frame
+        self.report = report
+        self.onEnd = onEnd
         self.now = now
         self.schedule = schedule
     }
@@ -141,7 +138,7 @@ final class ScrollFingers {
     /// A normal lift may hand momentum to macOS; edge backlog is never replayed.
     func end() {
         cancelWork()
-        if restingUntil == nil && !needsPlacement { flush() }
+        if !needsPlacement && !quietEdge { flush() }
         lift(at: zeroTime ?? now())
         clearMotion()
     }
@@ -149,8 +146,8 @@ final class ScrollFingers {
     /// Session/device/input-owner teardown discards even the unflushed sample.
     func cancel() {
         cancelWork()
-        clearMotion()
         lift(at: now())
+        clearMotion()
     }
 
     private func cancelWork() {
@@ -163,8 +160,9 @@ final class ScrollFingers {
 
     private func clearMotion() {
         pendingX = 0; pendingY = 0; pendingTime = nil
-        backlogX = 0; backlogY = 0
-        restingUntil = nil
+        if regrips > 0 || skipped > 0 { onEnd(regrips, skipped) }
+        regrips = 0; skipped = 0
+        quietEdge = false
         needsPlacement = false
         lastSample = nil
         sampleStart = nil; zeroTime = nil
@@ -175,56 +173,49 @@ final class ScrollFingers {
         return (dx / factor, dy / factor)
     }
 
-    private func hold(_ dx: Double, _ dy: Double) {
-        (backlogX, backlogY) = Self.bounded(backlogX + dx, backlogY + dy, limit: Self.maxBacklog)
-    }
-
     private func flush() {
-        var dx = pendingX, dy = pendingY
-        let time = pendingTime ?? now()
+        guard let time = pendingTime else { return }
+        let dx = pendingX, dy = pendingY
         pendingX = 0; pendingY = 0; pendingTime = nil
-        guard dx != 0 || dy != 0 || restingUntil != nil else { return }
-        if dx * backlogX < 0 { backlogX = 0 }
-        if dy * backlogY < 0 { backlogY = 0 }
-        if needsPlacement {
-            hold(dx, dy)
-            regrip(at: time)
-            needsPlacement = false
-            return // move on the next sample, not at the instant of contact
+        guard dx != 0 || dy != 0 else { return }
+
+        let minX = Self.minX + Self.spread / 2, maxX = Self.maxX - Self.spread / 2
+        let horizontal = abs(dx) > abs(dy)
+        if !down {
+            x = (minX + maxX) / 2
+            y = (Self.minY + Self.maxY) / 2
+            if needsPlacement {
+                // Leave a little room for an immediate reversal after a regrip.
+                if horizontal { x += (dx > 0 ? -0.4 : 0.4) * (maxX - minX) }
+                else { y += (dy > 0 ? -0.4 : 0.4) * (Self.maxY - Self.minY) }
+            }
+            let placement = needsPlacement ? time : max(0.001, time - 0.008)
+            guard send(.down, x: x, y: y, at: placement) else { return }
+            down = true
+            if needsPlacement { needsPlacement = false; return }
         }
-        if let until = restingUntil {
-            hold(dx, dy)
-            frame(at: time) // same position: let the guest observe zero velocity
-            if now() >= until {
+
+        // Ease the last few samples towards the edge. One stationary sample
+        // gives macOS a low release velocity. A reversal can move away at once.
+        let distance = horizontal ? (dx > 0 ? maxX - x : x - minX)
+                                  : (dy > 0 ? Self.maxY - y : y - Self.minY)
+        if distance <= 1 {
+            if quietEdge {
                 lift(at: time)
-                restingUntil = nil
                 needsPlacement = true
+                regrips += 1
+            } else {
+                quietEdge = send(.move, x: x, y: y, at: time)
             }
             return
         }
-        // Pay held motion out gradually, within the same per-frame bound.
-        let shareX = backlogX * 0.35, shareY = backlogY * 0.35
-        backlogX -= shareX; backlogY -= shareY
-        if abs(backlogX) < 1 && abs(backlogY) < 1 { backlogX = 0; backlogY = 0 }
-        (dx, dy) = Self.bounded(dx + shareX, dy + shareY, limit: travelLimit)
-        guard dx != 0 || dy != 0 else { return }
-        if !down {
-            // Leave a sample interval between initial contact and movement.
-            // A light swipe can start with a tiny delta in the wrong direction.
-            // Leave room to move either way until the direction has settled.
-            x = 8134 / 2
-            y = (Self.minY + Self.maxY) / 2
-            place(at: max(0.001, time - 0.008))
+        let fraction = min(1, max(1, distance / 2) / max(abs(dx), abs(dy)))
+        let nx = min(max(x + dx * fraction, minX), maxX)
+        let ny = min(max(y + dy * fraction, Self.minY), Self.maxY)
+        if send(.move, x: nx, y: ny, at: time) {
+            x = nx; y = ny
+            quietEdge = false
         }
-        let nx = x + dx, ny = y + dy
-        x = min(max(nx, Self.minX + Self.spread / 2), Self.maxX - Self.spread / 2)
-        y = min(max(ny, Self.minY), Self.maxY)
-        let reachedEdge = abs(dx) > abs(dy) ? x != nx : y != ny
-        if reachedEdge {
-            restingUntil = now() + Self.rest
-            hold(nx - x, ny - y)
-        }
-        frame(at: time)
     }
 
     private static func ms(_ time: TimeInterval) -> UInt32 {
@@ -233,38 +224,18 @@ final class ScrollFingers {
         return UInt32((time * 1000).truncatingRemainder(dividingBy: 4294967296))
     }
 
-    private func frame(at time: TimeInterval) {
-        guard down else { return }
-        let ts = Self.ms(time)
-        touch(ids.0, 1, Int32(x - Self.spread / 2), Int32(y), ts)
-        touch(ids.1, 1, Int32(x + Self.spread / 2), Int32(y), ts)
-        commitFrame(ts)
-    }
-
-    private func regrip(at time: TimeInterval) {
-        if abs(backlogY) >= abs(backlogX) {
-            x = 8134 / 2
-            y = backlogY > 0 ? Self.minY : Self.maxY
-        } else {
-            x = backlogX > 0 ? Self.minX + Self.spread / 2 : Self.maxX - Self.spread / 2
-            y = 5206 / 2
-        }
-        place(at: time)
-    }
-
-    private func place(at time: TimeInterval) {
-        let ts = Self.ms(time)
-        touch(ids.0, 0, Int32(x - Self.spread / 2), Int32(y), ts)
-        touch(ids.1, 0, Int32(x + Self.spread / 2), Int32(y), ts)
-        down = true
+    private func send(_ phase: Phase, x: Double, y: Double, at time: TimeInterval) -> Bool {
+        let accepted = report(firstID, phase, Int32(x - Self.spread / 2), Int32(x + Self.spread / 2),
+                              Int32(y), Self.ms(time))
+        if !accepted { skipped += 1 }
+        return accepted
     }
 
     private func lift(at time: TimeInterval) {
         guard down else { return }
-        let ts = Self.ms(time)
-        touch(ids.0, 2, 0, 0, ts)
-        touch(ids.1, 2, 0, 0, ts)
+        _ = send(.up, x: x, y: y, at: time)
         down = false
-        pair = (pair + 1) % Self.pairs.count
+        quietEdge = false
+        firstID = firstID == 14 ? 12 : 14
     }
 }

@@ -255,6 +255,7 @@ static void set_ep_state(HvXhci *x, int slot, int dci, uint32_t state) {
 /* ---- endpoint 0: the devices' control requests ---- */
 
 static int tp_build_report(HvXhci *x, uint8_t *out);
+static uint32_t tp_now_ms(void);
 
 /* The Magic Trackpad 2's surface, in 0.01 mm (160.0 x 114.9 mm). The guest's driver
    reads it out of the sensor-surface register to scale touches into millimetres. */
@@ -524,7 +525,9 @@ static void run_ep_in(HvXhci *x, int slot) {
             if (len >= 30 && x->tp_multi_logs < 40) { /* two fingers or more: dump the frame so we can watch them move */
                 x->tp_multi_logs++;
                 int nf = (int)((len - 12) / 9);
-                fprintf(stderr, "hengevm: xhci: trackpad: %d fingers:", nf);
+                uint32_t sample_ms = (rep[9] >> 3) | ((uint32_t)rep[10] << 5) | ((uint32_t)rep[11] << 13);
+                fprintf(stderr, "hengevm: xhci: trackpad: sample_ms=%u delivered_ms=%u queued=%u, %d fingers:",
+                        sample_ms, tp_now_ms() & 0x1fffff, x->tp_rtail - x->tp_rhead, nf);
                 for (int i = 0; i < nf; i++) {
                     const uint8_t *b = rep + 12 + 9 * i;
                     int xc = b[0] | ((b[1] & 0x1f) << 8); if (xc & 0x1000) xc -= 0x2000;
@@ -1099,6 +1102,64 @@ void hv_xhci_touch_frame(HvXhci *x, uint32_t ts_ms) {
     tp_queue(x, ts_ms);
     pthread_mutex_unlock(&x->mu);
     hv_machine_wake(x->m);
+}
+
+/* IDs 12..15 belong to one hardware scroll gesture at a time. */
+static int tp_end_scroll_contacts(HvXhci *x, int first_id, uint32_t ts_ms) {
+    struct HvTpFinger *closing[HV_TP_FINGERS];
+    int count = 0;
+    for (int i = 0; i < HV_TP_FINGERS; i++) {
+        struct HvTpFinger *f = &x->tp_fingers[i];
+        if (f->in && (f->id == first_id || f->id == first_id + 1)) {
+            f->state = 7;
+            closing[count++] = f;
+        }
+    }
+    if (!count) return 0;
+    /* Keep the stopped pair and final state deliverable even on a full ring. */
+    if (x->tp_rtail - x->tp_rhead > HV_TP_REPORTS - 2) x->tp_rhead = x->tp_rtail - (HV_TP_REPORTS - 2);
+    tp_queue(x, ts_ms);
+    for (int i = 0; i < count; i++) closing[i]->in = 0;
+    tp_queue(x, ts_ms);
+    return 1;
+}
+
+int hv_xhci_scroll_pair(HvXhci *x, int first_id, int phase, int left, int right, int y, uint32_t ts_ms) {
+    if (!x || (first_id != 12 && first_id != 14) || phase < 0 || phase > 2) return 0;
+    if (phase != 2 && (left < 0 || left >= right || right > HV_TP_SENSOR_X || y < 0 || y > HV_TP_SENSOR_Y)) return 0;
+    pthread_mutex_lock(&x->mu);
+    /* Advance absolute coordinates only when the guest has room for the report. */
+    int accepted = 0;
+    if (phase == 2) {
+        accepted = tp_end_scroll_contacts(x, first_id, ts_ms);
+    } else {
+        if (x->tp_rtail - x->tp_rhead >= 2) goto out;
+        struct HvTpFinger *pair[2] = {NULL, NULL};
+        int free_slots = 0;
+        for (int i = 0; i < HV_TP_FINGERS; i++) {
+            struct HvTpFinger *f = &x->tp_fingers[i];
+            if (phase == 0) {
+                /* A resumed snapshot may still hold an old hardware pair. Send
+                   its lift first, then retry placement on a fresh sample. */
+                if (f->in && f->id >= 12) {
+                    tp_end_scroll_contacts(x, f->id & ~1, ts_ms);
+                    goto out;
+                }
+                if (!f->in && free_slots < 2) pair[free_slots++] = f;
+            } else if (f->in && (f->id == first_id || f->id == first_id + 1)) {
+                pair[f->id - first_id] = f;
+            }
+        }
+        if (!pair[0] || !pair[1]) goto out;
+        for (int i = 0; i < 2; i++)
+            *pair[i] = (struct HvTpFinger){.in = 1, .id = first_id + i, .x = i ? right : left, .y = y, .state = 4};
+        tp_queue(x, ts_ms);
+        accepted = 1;
+    }
+out:
+    pthread_mutex_unlock(&x->mu);
+    if (accepted || phase == 0) hv_machine_wake(x->m);
+    return accepted;
 }
 
 void hv_xhci_touch_button(HvXhci *x, int down) {
