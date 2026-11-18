@@ -118,9 +118,11 @@ jobs:
         working-directory: Henge
         run: zsh tools/build_ios_restore.sh
 
-      - name: Build the engine
+      # Build the macOS samples outside Xcode's iOS build-script environment.
+      # Keep hdiutil diagnostics in the Actions log if image creation fails.
+      - name: Build the engine and sample disk image
         working-directory: Henge
-        run: make ios-lib
+        run: make ios-lib build/tl-samples.dmg
 
       - name: Package Henge.ipa
         working-directory: Henge
