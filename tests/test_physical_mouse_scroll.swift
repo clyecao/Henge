@@ -38,7 +38,7 @@ struct PhysicalMouseScrollTests {
         var recorded = PhysicalMouseScroll()
         let samples: [Float] = [0.017333984, 9.184784, 36.241714, 51.288696, 0]
         let times: [TimeInterval] = [0, 0.02443, 0.04816, 0.07292, 0.28139]
-        let expected: [Int32] = [0, -2, -1, -1, 0]
+        let expected: [Int32] = [-1, -2, -1, -1, 0]
         for i in samples.indices {
             checkDelta(recorded.consume(first: samples[i], second: 0, sensitivity: 0.3,
                                         reversed: false, timestamp: times[i]),
@@ -50,7 +50,7 @@ struct PhysicalMouseScrollTests {
         var axes = PhysicalMouseScroll()
         checkDelta(axes.consume(first: 2, second: 0, sensitivity: 0.5, reversed: false, timestamp: tick()), 0, -2, "vertical axis")
         checkDelta(axes.consume(first: 2, second: 2, sensitivity: 0.5, reversed: false, timestamp: tick()), 2, 0, "stale vertical")
-        checkDelta(axes.consume(first: 2, second: 2, sensitivity: 0.5, reversed: false, timestamp: tick()), 0, 0, "duplicate callback")
+        checkDelta(axes.consume(first: 2, second: 2, sensitivity: 0.5, reversed: false, timestamp: sampleTime), 0, 0, "duplicate callback")
         checkDelta(axes.consume(first: 0, second: 2, sensitivity: 0.5, reversed: false, timestamp: tick()), 0, 0, "vertical reset")
         checkDelta(axes.consume(first: 0, second: 0, sensitivity: 0.5, reversed: false, timestamp: tick()), 0, 0, "horizontal reset")
         checkDelta(axes.consume(first: -2, second: -2, sensitivity: 0.5, reversed: false, timestamp: tick()), -2, 2, "negative diagonal")
@@ -69,21 +69,25 @@ struct PhysicalMouseScrollTests {
         // Disconnected devices/sessions start with fresh state. Two simultaneously
         // attached devices must not share the previous axis value or fractions.
         var deviceA = PhysicalMouseScroll(), deviceB = PhysicalMouseScroll()
-        checkDelta(deviceA.consume(first: 0.5, second: 0, sensitivity: 0.5, reversed: false, timestamp: tick()), 0, 0, "device A fraction")
-        checkDelta(deviceB.consume(first: 0.5, second: 0, sensitivity: 0.5, reversed: false, timestamp: tick()), 0, 0, "device B independent")
-        _ = deviceA.consume(first: 0, second: 0, sensitivity: 0.5, reversed: false, timestamp: tick())
-        checkDelta(deviceA.consume(first: 0.5, second: 0, sensitivity: 0.5, reversed: false, timestamp: tick()), 0, -1, "device A retained fraction")
+        _ = deviceA.consume(first: 1, second: 0, sensitivity: 0.5, reversed: false, timestamp: 0)
+        _ = deviceB.consume(first: 1, second: 0, sensitivity: 0.5, reversed: false, timestamp: 0)
+        checkDelta(deviceA.consume(first: 0.5, second: 0, sensitivity: 0.5, reversed: false, timestamp: 0.01), 0, 0, "device A fraction")
+        checkDelta(deviceB.consume(first: 0.5, second: 0, sensitivity: 0.5, reversed: false, timestamp: 0.01), 0, 0, "device B independent")
+        _ = deviceA.consume(first: 0, second: 0, sensitivity: 0.5, reversed: false, timestamp: 0.015)
+        checkDelta(deviceA.consume(first: 0.5, second: 0, sensitivity: 0.5, reversed: false, timestamp: 0.02), 0, -1, "device A retained fraction")
         deviceA = PhysicalMouseScroll()
-        checkDelta(deviceA.consume(first: 0.5, second: 0, sensitivity: 0.5, reversed: false, timestamp: tick()), 0, 0, "reconnect reset")
+        checkDelta(deviceA.consume(first: 0.5, second: 0, sensitivity: 0.5, reversed: false, timestamp: 0.02), 0, -1, "first detent after reconnect")
+        checkDelta(deviceA.consume(first: 0.5, second: 0, sensitivity: 0.5, reversed: false, timestamp: 0.03), 0, 0, "reconnect reset remainder")
 
         // Invalid input must not poison the last valid axis state or the remainder.
         var invalid = PhysicalMouseScroll()
-        checkDelta(invalid.consume(first: 0.5, second: 0, sensitivity: 0.5, reversed: false, timestamp: tick()), 0, 0, "fraction before invalid input")
+        _ = invalid.consume(first: 1, second: 0, sensitivity: 0.5, reversed: false, timestamp: 0)
+        checkDelta(invalid.consume(first: 0.5, second: 0, sensitivity: 0.5, reversed: false, timestamp: 0.01), 0, 0, "fraction before invalid input")
         for bad in [Float.nan, .infinity, -.infinity] {
-            checkDelta(invalid.consume(first: bad, second: 2, sensitivity: 0.5, reversed: false, timestamp: tick()), 0, 0, "invalid first axis")
-            checkDelta(invalid.consume(first: 2, second: bad, sensitivity: 0.5, reversed: false, timestamp: tick()), 0, 0, "invalid second axis")
+            checkDelta(invalid.consume(first: bad, second: 2, sensitivity: 0.5, reversed: false, timestamp: 0.02), 0, 0, "invalid first axis")
+            checkDelta(invalid.consume(first: 2, second: bad, sensitivity: 0.5, reversed: false, timestamp: 0.02), 0, 0, "invalid second axis")
         }
-        checkDelta(invalid.consume(first: 0.75, second: 0, sensitivity: 0.5, reversed: false, timestamp: tick()), 0, -1, "recover after invalid input")
+        checkDelta(invalid.consume(first: 0.75, second: 0, sensitivity: 0.5, reversed: false, timestamp: 0.03), 0, -1, "recover after invalid input")
         check(ScrollSensitivity.clamped(.nan) == 0.3, "NaN setting must use default")
         check(ScrollSensitivity.clamped(.infinity) == 0.3, "infinite setting must use default")
         check(ScrollSensitivity.clamped(-1) == 0.05, "negative setting must use minimum")
@@ -109,9 +113,34 @@ struct PhysicalMouseScrollTests {
                 check(abs(Double(total) - distance) < 1.000001, "long stream must conserve fractions")
             }
         }
+        testSlowWheel()
         testSustainedScrolling()
         testBurstsAndClock()
-        print("PASS: physical mouse scrolling, \(checks) checks; timed swipe = 4 detents; sustained rate bounded")
+        print("PASS: physical mouse scrolling, \(checks) checks; slow detents and sustained rate")
+    }
+
+    static func testSlowWheel() {
+        var wheel = PhysicalMouseScroll()
+        for i in 0..<8 {
+            let time = Double(i) * 0.25
+            let raw: Float = i < 4 ? 0.02 : -0.02
+            let expected: Int32 = i < 4 ? -1 : 1
+            checkDelta(wheel.consume(first: raw, second: 0, sensitivity: 0.05, reversed: false, timestamp: time),
+                       0, expected, "each isolated wheel notch must reach the guest at minimum speed")
+            checkDelta(wheel.consume(first: raw, second: 0, sensitivity: 0.05, reversed: false, timestamp: time + 0.0001),
+                       0, 0, "same report must not double a slow detent")
+            if i.isMultiple(of: 2) {
+                checkDelta(wheel.consume(first: 0, second: 0, sensitivity: 0.05, reversed: false, timestamp: time + 0.22),
+                           0, 0, "late reset must not use the next isolated step")
+            }
+        }
+        var fine = PhysicalMouseScroll()
+        var detents: Int32 = 0
+        for i in 0..<40 {
+            detents += fine.consume(first: 0, second: 0.02, sensitivity: 0.05, reversed: false,
+                                    timestamp: Double(i) * 0.025).dx
+        }
+        check((5...6).contains(detents), "a second of fine wheel motion must keep moving at minimum speed")
     }
 
     static func testSustainedScrolling() {

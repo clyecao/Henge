@@ -80,6 +80,7 @@ struct ScrollFingersTests {
         check(TrackpadScrollSettings.key != ScrollSensitivity.key, "trackpad speed must not overwrite mouse speed")
         testMergeAndEnd()
         testLightSteadySwipe()
+        testCapturedMagicKeyboardSwipe()
         testCancellation()
         testSensitivity()
         testLongSwipes()
@@ -97,9 +98,12 @@ struct ScrollFingersTests {
         check(pad.frames.count == 1, "one merged frame per sample")
         let motion = pad.movement(pad.frames[0])
         check(motion.0 == -20 && motion.1 == -40, "stale axis must not double movement")
+        pad.send(0, 0.5) // the vertical reset still carries stale horizontal motion
+        pad.advance(0.0001)
         pad.send(0, 0)
         pad.advance(0.017)
         check(pad.contacts.isEmpty, "confirmed zero sample must lift both fingers")
+        check(pad.frames.count == 1, "a split release must not add a sideways frame")
         let count = pad.events.count
         pad.advance(0.3)
         check(pad.events.count == count, "ended gesture must not fire delayed work")
@@ -132,6 +136,41 @@ struct ScrollFingersTests {
         delayed.fingers.cancel()
     }
 
+    static func testCapturedMagicKeyboardSwipe() {
+        // Complete snapshots from the first 97 ms of the iPad14,6 trace.
+        // GC sends the new vertical value first, then updates the horizontal
+        // value within the same report. The previous converter stopped at
+        // y=1532 while seven more nonzero reports arrived.
+        let samples: [(Double, Float, Float)] = [
+            (0, 0.37573242, 0), (5.24, 3.45047, 1.3325806), (13.60, 6.53685, 2.2505646),
+            (21.91, 7.853821, 1.9752197), (30.29, 10.31604, 2.230957), (38.83, 11.545212, 2.0889893),
+            (46.91, 21.690735, 2.4911194), (55.39, 18.991852, 1.7157288), (63.66, 42.80809, 1.7824097),
+            (71.95, 28.758423, 0.8491211), (80.29, 51.26082, 0.11061096), (88.69, 27.390167, 0),
+            (96.97, 31.784698, 0)
+        ]
+        let pad = Pad()
+        let start = pad.time
+        var previousX: Float = 0
+        for (ms, vertical, horizontal) in samples {
+            pad.advance(max(0, start + ms / 1000 - pad.time))
+            pad.send(vertical, previousX)
+            if horizontal != previousX {
+                pad.advance(0.0001)
+                pad.send(vertical, horizontal)
+            }
+            previousX = horizontal
+        }
+        pad.advance(0.004)
+        check(pad.frames.count == samples.count, "each captured sample must reach the guest as one frame")
+        var lastY = pad.events.first!.point.y
+        for frame in pad.frames {
+            guard let point = frame.contacts[14] else { fatalError("short swipe should not need a regrip") }
+            check(point.y < lastY, "ongoing input must advance both contacts throughout the captured swipe")
+            lastY = point.y
+        }
+        pad.fingers.cancel()
+    }
+
     static func testLightSteadySwipe() {
         for horizontal in [true, false] {
             let pad = Pad()
@@ -153,6 +192,15 @@ struct ScrollFingersTests {
             check(horizontal ? current.x > previous.x : current.y > previous.y, "small reversal must move immediately")
             pad.fingers.cancel()
         }
+
+        let drift = Pad()
+        for i in 0..<24 {
+            drift.send(0.25, i.isMultiple(of: 2) ? 0.01 : 0.02)
+            drift.advance(0.008)
+        }
+        check(drift.movement(drift.frames.last!).1 == -240,
+              "a jittering lateral axis must not cancel steady vertical travel")
+        drift.fingers.cancel()
 
         let delayed = Pad()
         for i in 0..<4 {
@@ -231,8 +279,11 @@ struct ScrollFingersTests {
                 pad.send(i.isMultiple(of: 2) ? -6 : -7)
                 pad.advance(0.008)
             }
-            let reversed = pad.frames.dropFirst(count)
-            check(reversed.contains { pad.movement($0).1 > 0 }, "direction change must recover after edge rest")
+            let reversed = pad.frames.dropFirst(count).prefix(15)
+            check(zip(reversed, reversed.dropFirst()).contains { before, after in
+                guard let id = before.contacts.keys.min(), let next = after.contacts[id] else { return false }
+                return next.y > before.contacts[id]!.y
+            }, "direction change must move a live pair back within one edge rest and regrip")
             pad.send(0)
             pad.advance(0.017)
             check(pad.contacts.isEmpty, "long-swipe release must lift contacts")

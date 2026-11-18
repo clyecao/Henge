@@ -38,9 +38,9 @@ final class ScrollFingers {
     private var ids: (Int32, Int32) { Self.pairs[pair] }
     private var down = false
     private var x = 0.0, y = 0.0
-    private var lastFirst: Float = 0, lastSecond: Float = 0
     private var lastSample: TimeInterval?
     private var sampleStart: TimeInterval?
+    private var travelLimit = 0.0
     private var zeroTime: TimeInterval?
     private var pendingX = 0.0, pendingY = 0.0
     private var pendingTime: TimeInterval?
@@ -73,7 +73,7 @@ final class ScrollFingers {
             end() // a new report arrived before the main queue ran the lift timer
         }
         lastSample = time
-        let identical = first == lastFirst && second == lastSecond
+        let scale = ScrollSensitivity.clamped(sensitivity) / 0.3
         let newSample = sampleStart.map { time - $0 >= Self.mergeDelay } ?? true
         // A busy main queue can deliver several hardware samples before the
         // merge timer runs. Commit the preceding one at its own timestamp.
@@ -83,30 +83,36 @@ final class ScrollFingers {
                 flushWork = nil
                 flush()
             }
+            // The captured 120 Hz input reached 51 points per sample. Cap
+            // virtual finger speed to avoid crossing the pad in a few frames.
+            let interval = sampleStart.map { min(time - $0, 1.0 / 30) } ?? 1.0 / 120
+            travelLimit = min(Self.maxStep, 7200 * scale * interval)
             sampleStart = time
         }
-        let repeatMotion = identical && newSample
-        let verticalChanged = first != lastFirst || repeatMotion
-        let horizontalChanged = second != lastSecond || repeatMotion
-        lastFirst = first
-        lastSecond = second
         if first == 0 && second == 0 {
+            // A split release can briefly carry the previous sample's other
+            // axis. Once a gesture is down, its final snapshot replaces that
+            // partial report. Preserve a quick initial movement before lift.
+            if !newSample && down {
+                pendingX = 0; pendingY = 0; pendingTime = nil
+                flushWork?.cancel()
+                flushWork = nil
+            }
             if zeroTime == nil && (down || pendingTime != nil || needsPlacement) {
                 zeroTime = time
                 armLift(after: Self.releaseDelay)
             }
             return
         }
+        // Each callback carries the current two-axis snapshot. Replace a split
+        // update before flushing, retaining a steady axis in the next sample.
+        // A late duplicate of an already committed report has no pending frame.
+        guard newSample || pendingTime != nil || zeroTime != nil || !down else { return }
         zeroTime = nil
-        guard verticalChanged || horizontalChanged else { return }
         // The fingers move opposite to GameController's content direction.
         // Keep PR #167's calibration: 40 sensor units/point at sensitivity 0.3.
-        let gain = (reversed ? 1.0 : -1.0) * 40 * ScrollSensitivity.clamped(sensitivity) / 0.3
-        let dx = horizontalChanged ? Double(second) * gain : 0
-        let dy = verticalChanged ? Double(first) * gain : 0
-        if dx * backlogX < 0 { backlogX = 0 }
-        if dy * backlogY < 0 { backlogY = 0 }
-        (pendingX, pendingY) = Self.bounded(pendingX + dx, pendingY + dy, limit: Self.maxStep)
+        let gain = (reversed ? 1.0 : -1.0) * 40 * scale
+        (pendingX, pendingY) = Self.bounded(Double(second) * gain, Double(first) * gain, limit: travelLimit)
         pendingTime = time
         if flushWork == nil {
             let token = generation
@@ -160,7 +166,7 @@ final class ScrollFingers {
         backlogX = 0; backlogY = 0
         restingUntil = nil
         needsPlacement = false
-        lastFirst = 0; lastSecond = 0; lastSample = nil
+        lastSample = nil
         sampleStart = nil; zeroTime = nil
     }
 
@@ -178,6 +184,8 @@ final class ScrollFingers {
         let time = pendingTime ?? now()
         pendingX = 0; pendingY = 0; pendingTime = nil
         guard dx != 0 || dy != 0 || restingUntil != nil else { return }
+        if dx * backlogX < 0 { backlogX = 0 }
+        if dy * backlogY < 0 { backlogY = 0 }
         if needsPlacement {
             hold(dx, dy)
             regrip(at: time)
@@ -198,7 +206,7 @@ final class ScrollFingers {
         let shareX = backlogX * 0.35, shareY = backlogY * 0.35
         backlogX -= shareX; backlogY -= shareY
         if abs(backlogX) < 1 && abs(backlogY) < 1 { backlogX = 0; backlogY = 0 }
-        (dx, dy) = Self.bounded(dx + shareX, dy + shareY, limit: Self.maxStep)
+        (dx, dy) = Self.bounded(dx + shareX, dy + shareY, limit: travelLimit)
         guard dx != 0 || dy != 0 else { return }
         if !down {
             // Leave a sample interval between initial contact and movement.
@@ -209,13 +217,13 @@ final class ScrollFingers {
             place(at: max(0.001, time - 0.008))
         }
         let nx = x + dx, ny = y + dy
-        if nx - Self.spread / 2 < Self.minX || nx + Self.spread / 2 > Self.maxX || ny < Self.minY || ny > Self.maxY {
+        x = min(max(nx, Self.minX + Self.spread / 2), Self.maxX - Self.spread / 2)
+        y = min(max(ny, Self.minY), Self.maxY)
+        let reachedEdge = abs(dx) > abs(dy) ? x != nx : y != ny
+        if reachedEdge {
             restingUntil = now() + Self.rest
-            hold(dx, dy)
-            frame(at: time)
-            return
+            hold(nx - x, ny - y)
         }
-        x = nx; y = ny
         frame(at: time)
     }
 

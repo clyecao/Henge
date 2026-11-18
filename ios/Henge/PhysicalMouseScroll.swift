@@ -16,14 +16,22 @@ enum ScrollSensitivity {
 // mapping amplified tiny movements and emitted up to 32 detents per callback.
 struct WheelScroll {
     private var remainder = 0.0
+    private var lastStep: TimeInterval?
 
-    mutating func units(for value: Float, sensitivity: Double) -> Int32 {
+    mutating func units(for value: Float, sensitivity: Double, timestamp: TimeInterval? = nil) -> Int32 {
         guard value.isFinite, value != 0 else { return 0 }
         // Bound bursts before scaling, so even fast swipes respect the slider.
         let bounded = min(max(Double(value), -4), 4)
         remainder += bounded * 2 * ScrollSensitivity.clamped(sensitivity)
-        let whole = remainder.rounded(.towardZero)
+        var whole = remainder.rounded(.towardZero)
         remainder -= whole
+        // A discrete guest wheel needs a whole detent. Give the first notch
+        // immediate feedback, and keep a stream of tiny deltas responsive.
+        if let timestamp, whole == 0, lastStep.map({ timestamp - $0 >= 0.18 }) ?? true {
+            whole = value < 0 ? -1 : 1
+            remainder = 0
+        }
+        if whole != 0 { lastStep = timestamp }
         return Int32(whole)
     }
 }
@@ -62,8 +70,10 @@ struct PhysicalMouseScroll {
         let elapsed = lastTimestamp.map { timestamp - $0 } ?? 0
         guard elapsed >= 0 else { return (0, 0) }
         lastTimestamp = timestamp
-        let verticalChanged = first != lastFirst
-        let horizontalChanged = second != lastSecond
+        // Separate detents can report the same value, even without an intervening zero.
+        let repeatedSample = first == lastFirst && second == lastSecond && elapsed >= 0.003
+        let verticalChanged = first != lastFirst || repeatedSample
+        let horizontalChanged = second != lastSecond || repeatedSample
         lastFirst = first
         lastSecond = second
         // Retain the existing dominant-axis filter for slight sideways finger drift.
@@ -72,8 +82,8 @@ struct PhysicalMouseScroll {
         let verticalRaw = verticalChanged && !mostlyHorizontal ? -first : 0
         let horizontalRaw = horizontalChanged && !mostlyVertical ? second : 0
         let way: Int32 = reversed ? -1 : 1
-        let dx = horizontal.units(for: horizontalRaw, sensitivity: sensitivity)
-        let dy = vertical.units(for: verticalRaw, sensitivity: sensitivity)
+        let dx = horizontal.units(for: horizontalRaw, sensitivity: sensitivity, timestamp: timestamp)
+        let dy = vertical.units(for: verticalRaw, sensitivity: sensitivity, timestamp: timestamp)
         return (way * horizontalRate.apply(dx, sensitivity: sensitivity, elapsed: elapsed),
                 way * verticalRate.apply(dy, sensitivity: sensitivity, elapsed: elapsed))
     }

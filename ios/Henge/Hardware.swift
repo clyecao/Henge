@@ -173,7 +173,7 @@ final class HardwareMouse {
     private var restX: Float = 0, restY: Float = 0
     private var speed: Float = 1
     private var reverse = false
-    private var scrollsLogged = 0 // the first few, to see what a device's raw values look like
+    private var wheelLogs = 0, trackpadLogs = 0
     private var scrolls: [ObjectIdentifier: PhysicalMouseScroll] = [:]
     private var trackpads: Set<ObjectIdentifier> = []
     private var smoothDevice: ObjectIdentifier?
@@ -192,7 +192,8 @@ final class HardwareMouse {
         buttonsLogged = 0
         HengeLog.log("input", "physical mouse: swap right/middle \(swapButtons ? "on" : "off")")
         scrolls = scrolls.mapValues { _ in PhysicalMouseScroll() }
-        scrollsLogged = 0
+        wheelLogs = 0
+        trackpadLogs = 0
         GCMouse.mice().forEach(attach)
         observers.append(NotificationCenter.default.addObserver(forName: .GCMouseDidConnect, object: nil, queue: .main) { [weak self] note in
             if let mouse = note.object as? GCMouse { self?.attach(mouse) }
@@ -306,8 +307,8 @@ final class HardwareMouse {
                 ? TrackpadScrollSettings.defaultValue : defaults.double(forKey: TrackpadScrollSettings.key)
             scrollFingers.scroll(first: first, second: second, sensitivity: configured, reversed: reverse,
                                  sampleTimestamp: sampleTimestamp)
-            if scrollsLogged < 24 {
-                scrollsLogged += 1
+            if trackpadLogs < 24 {
+                trackpadLogs += 1
                 HengeLog.log("input", "trackpad scroll raw: \(first), \(second); speed: \(configured)")
             }
             return
@@ -318,9 +319,9 @@ final class HardwareMouse {
         guard let wheel = scrolls[mouseID]?.consume(first: first, second: second,
                                                    sensitivity: configured, reversed: reverse,
                                                    timestamp: ProcessInfo.processInfo.systemUptime) else { return }
-        if scrollsLogged < 24 {
-            scrollsLogged += 1
-            HengeLog.log("input", "scroll raw: \(first), \(second); units: \(wheel.dx), \(wheel.dy)")
+        if wheelLogs < 24 {
+            wheelLogs += 1
+            HengeLog.log("input", "wheel scroll raw: \(first), \(second); speed: \(configured); units: \(wheel.dx), \(wheel.dy)")
         }
         if wheel.dx != 0 || wheel.dy != 0 { henge_vm_mouse_scroll(wheel.dx, wheel.dy) }
     }

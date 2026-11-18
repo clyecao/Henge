@@ -19,6 +19,9 @@ fractional detents for later callbacks. Default sensitivity remains 0.3; the sli
 now permits 0.05–1.5. Existing saved settings remain effective. Each attached device
 owns its own previous-axis state and fractional motion; disconnect/session stop
 discards that state. Non-finite input is ignored before changing it.
+An isolated notch emits at least one detent. During fine scrolling, the next
+nonzero input on an axis can emit a detent after 180 ms without a step on that
+axis. Equal wheel values at least 3 ms apart count as separate reports.
 
 ## Sustained scrolling
 
@@ -43,8 +46,8 @@ commit `e158322564d5ad83708a2d44d7e431613544592b` by Jens Köhler. Scroll deltas
 two contacts on the existing Magic Trackpad 2, so macOS handles pixel scrolling
 and momentum. They bypass the wheel conversion and rate limit above.
 
-- Merge callbacks within a 3 ms sample window. Ignore duplicate callbacks within
-  that window and accept equal displacements in successive samples. Use the input
+- Merge callbacks within a 3 ms sample window, using the latest two-axis snapshot.
+  A steady vertical displacement still counts when the horizontal value changes. Use the input
   profile's event time when available so queued samples can retain separate frames.
 - Start the first pair near the center so a light change of direction has room.
 - Lift after a zero persists for 16 ms or after 120 ms of inactivity. Cancel pending work on device/session
@@ -53,6 +56,9 @@ and momentum. They bypass the wheel conversion and rate limit above.
 - Alternate finger pairs 14/15 and 12/13, outside the touchscreen's 1–5.
 - At the pad edge, hold still for at least 50 ms before lifting. Reposition and
   resume movement on separate samples, avoiding an instantaneous new flick.
+- At default speed, cap virtual finger travel at 7,200 sensor units per second.
+  Scale the cap with the slider and sample interval (up to 33 ms). This keeps
+  accelerated input from exhausting the sensor in the first few frames of a swipe.
 - Bound frame travel and held motion, discard held motion on release, and clear
   opposing held motion when direction reverses. Huge input cannot stall at an edge
   forever or create unlimited delayed travel.
@@ -70,12 +76,14 @@ and `bash ios/scripts/check_display.sh`. The package workflow runs these checks.
 Scroll tests replay captured deltas, check small-motion accumulation, both axes,
 direction reversal, stale-axis filtering, separate devices, invalid values and
 speed bounds. The captured vertical sequence `0.017333984, 9.184784, 36.241714,
-51.288696, 0`, at its recorded intervals, emits `0, -2, -1, -1, 0` detents at the
+51.288696, 0`, at its recorded intervals, emits `-1, -2, -1, -1, 0` detents at the
 default setting. Ten-second traces at 30/60/125/1000 Hz check sustained output,
 and same-time bursts, clock anomalies and releases check that no excess is replayed.
 The smooth-scroll tests use a controlled clock and scheduler to check device
 routing, merged two-contact frames, speed/direction, idle lift, canceled timers,
-long-swipe edge rests, alternating IDs and extreme input bounds.
+long-swipe edge rests, alternating IDs and extreme input bounds. They also replay
+97 ms of Magic Keyboard input from an iPad14,6 and check that every sample
+advances both contacts without a regrip.
 
 On iPad, start with Trackpad scroll speed 0.3 and leave the mouse's accepted setting
 unchanged. Check small movements, long swipes, momentum after release, horizontal
