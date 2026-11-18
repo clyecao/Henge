@@ -1,95 +1,50 @@
-# Physical trackpad scrolling
+# Physical mouse and trackpad scrolling
 
-`HardwareMouse` routes Magic Keyboard and Magic Trackpad scroll deltas to virtual
-trackpad contacts. Other devices keep the guest's virtio mouse wheel. Device names
-are matched case-insensitively; an unknown name defaults to the wheel path. Logs
-include each device's name and selected scroll mode. The user's captured devices
-identify themselves as `Magic Keyboard` and `Bluetooth Mouse M558`.
+Henge sends scroll input from every `GCMouse`, including the Magic Keyboard
+trackpad, to the guest's virtio mouse wheel. Direct touches on the iPad screen
+still drive the emulated USB Magic Trackpad and support macOS multi-finger
+gestures. Hardware two-finger swipes produce wheel detents. macOS sees no
+finger-lift event from which to generate trackpad momentum.
 
-## Mouse wheels
+## Speed and direction
 
-The old conversion, `22 * sensitivity * sqrt(abs(delta))`, rounded
-each callback separately and capped it at 32 wheel detents. Even a small trackpad
-movement could become several detents, followed by the guest's wheel acceleration.
+Use **Settings → Mouse and Trackpad → Scroll speed** or open the running Mac's
+session details and adjust **Pointer → Scroll speed**. Both controls change the
+same setting immediately, from 0.05× to 1.5× with a default of 0.3×. Existing
+mouse scroll preferences apply to attached trackpads as well. **Reverse
+scrolling** applies to both devices the next time a Mac starts.
 
-The physical-input portion of [upstream PR #98](https://github.com/Leviidev/Henge/pull/98)
-(`bd5236963fcfc7fb4159fe9fe655c4450f8e4b42`, ZackLiuzeyu) supplies the replacement:
-bound each raw delta to ±4, multiply by twice the configured sensitivity, and keep
-fractional detents for later callbacks. Default sensitivity remains 0.3; the slider
-now permits 0.05–1.5. Existing saved settings remain effective. Each attached device
-owns its own previous-axis state and fractional motion; disconnect/session stop
-discards that state. Non-finite input is ignored before changing it.
-An isolated notch emits at least one detent. During fine scrolling, the next
-nonzero input on an axis can emit a detent after 180 ms without a step on that
-axis. Equal wheel values at least 3 ms apart count as separate reports.
+Each device tracks its own axes, fractional movement and rate limit. The first
+GameController axis scrolls vertically and the second horizontally. When the
+framework delivers the two axis changes separately, Henge filters the repeated
+axis. Each wheel report carries zero pointer displacement.
 
-## Sustained scrolling
+Henge bounds each raw delta to ±4, scales by twice the sensitivity and retains
+fractional detents. An isolated notch gets an immediate step even at 0.05×.
+During fine scrolling a nonzero sample can produce a step after 180 ms without
+a detent on that axis. The fractional conversion originated in
+[upstream PR #98](https://github.com/Leviidev/Henge/pull/98).
 
-Per-callback limits alone still allowed about 50 detents/second at sensitivity
-0.05 with a 125 Hz trackpad. The guest also uses event timing when applying
-[scroll acceleration](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDEventSystemPlugIns/IOHIDPointerScrollFilter.cpp).
-That explains why reducing each callback could improve a short swipe while a
-long swipe remained too fast; exact guest acceleration varies by configuration.
+Each axis can send up to `120 × sensitivity` detents per second after an initial
+burst of `max(1, ceil(8 × sensitivity))`. At 0.05× this allows one initial
+detent and six more per elapsed second. Excess whole detents expire on the
+current callback, so a paused guest cannot accumulate a burst in the converter.
 
-Each axis now has a time-based output budget: `120 * sensitivity` detents/second,
-with an initial burst of `max(1, ceil(8 * sensitivity))`. At 0.05 this permits one
-initial detent plus at most six per elapsed second. Monotonic host uptime drives
-the budget, so extra callbacks or stale-axis updates cannot refill it early.
-Excess whole detents are discarded, with no timer or backlog to replay on release.
-Fractional movement still accumulates for precise short gestures. Lowering the
-slider immediately clamps the stored allowance as well as the refill rate.
+## Why hardware trackpads use the wheel
 
-## Magic Keyboard and Magic Trackpad
+The previous implementation translated hardware deltas into two virtual fingers.
+Long swipes reached the edge of the virtual sensor and needed a lift and a new
+contact pair. In an iPad14,6 capture from build `30c2f45`, the first 40 paired
+reports arrived at a median interval of 8 ms. After 39 deliveries the queue was
+empty. All seven logged gesture summaries reported a contact reposition, and
+six recorded zero skipped reports. The wheel carries relative motion and has
+no sensor edge.
 
-`ScrollFingers.swift` adapts [upstream PR #167](https://github.com/Leviidev/Henge/pull/167),
-commit `e158322564d5ad83708a2d44d7e431613544592b` by Jens Köhler. Scroll deltas move
-two contacts on the existing Magic Trackpad 2, so macOS handles pixel scrolling
-and momentum. They bypass the wheel conversion and rate limit above.
+## Verification
 
-- Merge callbacks within a 3 ms sample window, using the latest two-axis snapshot.
-  A steady vertical displacement still counts when the horizontal value changes. Use the input
-  profile's event time when available so queued samples can retain separate frames.
-- Start the first pair near the center so a light change of direction has room.
-- Lift after a zero persists for 16 ms or after 120 ms of inactivity. Cancel pending work on device/session
-  teardown, input-source changes or touchscreen contact; touchscreen and hardware
-  fingers must not combine into a three/four-finger gesture.
-- Alternate finger pairs 14/15 and 12/13, outside the touchscreen's 1–5.
-- Reduce finger travel over the last few samples approaching a pad edge. Send
-  one stationary report before lifting and start the next pair on a fresh sample.
-  Reversing direction while approaching the edge moves the current pair back.
-- At default speed, cap virtual finger travel at 7,200 sensor units per second.
-  Scale the cap with the slider and sample interval (up to 33 ms). This keeps
-  accelerated input from exhausting the sensor in the first few frames of a swipe.
-- Submit each pair's placement, movement and stop as complete two-contact USB
-  reports. At two pending reports, skip new motion and keep the last accepted
-  position. The next sample applies only its own displacement. Lifts still reach
-  the queue. The gesture log counts regrips and skipped reports.
-
-Settings and session details now show **Mouse scroll speed** (existing saved
-setting) and **Trackpad scroll speed** (new `henge.trackpad.scrollSpeed` preference,
-default 0.3). Both apply immediately. Trackpad calibration follows #167: 40 sensor
-units per input point at 0.3. The shared reverse-scrolling setting still applies.
-Unknown hardware and mouse wheels retain their existing behavior.
-
-## Validation
-
-On an Apple Silicon Mac, run `make test-scroll-fingers test-physical-mouse-scroll test-mouse-reports`
-and `bash ios/scripts/check_display.sh`. The package workflow runs these checks.
-Scroll tests replay captured deltas, check small-motion accumulation, both axes,
-direction reversal, stale-axis filtering, separate devices, invalid values and
-speed bounds. The captured vertical sequence `0.017333984, 9.184784, 36.241714,
-51.288696, 0`, at its recorded intervals, emits `-1, -2, -1, -1, 0` detents at the
-default setting. Ten-second traces at 30/60/125/1000 Hz check sustained output,
-and same-time bursts, clock anomalies and releases check that no excess is replayed.
-The smooth-scroll tests use a controlled clock and scheduler to check device
-routing, merged two-contact frames, speed/direction, idle lift, canceled timers,
-edge deceleration, alternating IDs, delayed USB consumption and extreme input bounds. They also replay
-97 ms of Magic Keyboard input from an iPad14,6 and check that every sample
-advances both contacts without a regrip.
-
-On iPad, start with Trackpad scroll speed 0.3 and leave the mouse's accepted setting
-unchanged. Check small movements, long swipes, momentum after release, horizontal
-motion, reversal and touchscreen handoff. Compare the Bluetooth mouse, then repeat
-after detaching the Magic Keyboard or restarting the VM. Confirm the pointer stays
-still while scrolling. Real-device validation is still required for the guest's
-gesture recognition, edge transitions and perceived speed.
+Run `make test-physical-mouse-scroll test-mouse-reports test-vm-lifecycle` on an
+Apple Silicon Mac. The Swift suite replays 24 Magic Keyboard callbacks across
+115 ms at two sensitivities, as well as slow mouse notches and ten-second
+swipes. The native suites check wheel ordering, zero pointer displacement and
+restoring a saved VM with old hardware contacts. On iPad, compare a slow swipe,
+a long swipe and horizontal scrolling with the same wheel speed.

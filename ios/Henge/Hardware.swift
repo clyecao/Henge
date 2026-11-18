@@ -173,18 +173,12 @@ final class HardwareMouse {
     private var restX: Float = 0, restY: Float = 0
     private var speed: Float = 1
     private var reverse = false
-    private var wheelLogs = 0, trackpadLogs = 0, trackpadSummaries = 0
-    private var scrolls: [ObjectIdentifier: PhysicalMouseScroll] = [:]
-    private var trackpads: Set<ObjectIdentifier> = []
-    private var smoothDevice: ObjectIdentifier?
-    private var touchscreenOwners: Set<ObjectIdentifier> = []
-    private lazy var scrollFingers = ScrollFingers(
-        report: { henge_vm_scroll_pair($0, $1.rawValue, $2, $3, $4, $5) != 0 },
-        onEnd: { [weak self] regrips, skipped in
-            guard let self, self.trackpadSummaries < 24 else { return }
-            self.trackpadSummaries += 1
-            HengeLog.log("input", "trackpad gesture: regrips=\(regrips) skipped_reports=\(skipped)")
-        })
+    private struct ScrollDevice {
+        let name: String
+        var wheel = PhysicalMouseScroll()
+        var logged = 0
+    }
+    private var scrolls: [ObjectIdentifier: ScrollDevice] = [:]
 
     func start() {
         let defaults = UserDefaults.standard
@@ -195,10 +189,7 @@ final class HardwareMouse {
         buttons = PhysicalMouseButtons(swapsRightAndMiddle: swapButtons)
         buttonsLogged = 0
         HengeLog.log("input", "physical mouse: swap right/middle \(swapButtons ? "on" : "off")")
-        scrolls = scrolls.mapValues { _ in PhysicalMouseScroll() }
-        wheelLogs = 0
-        trackpadLogs = 0
-        trackpadSummaries = 0
+        scrolls = scrolls.mapValues { ScrollDevice(name: $0.name) }
         GCMouse.mice().forEach(attach)
         observers.append(NotificationCenter.default.addObserver(forName: .GCMouseDidConnect, object: nil, queue: .main) { [weak self] note in
             if let mouse = note.object as? GCMouse { self?.attach(mouse) }
@@ -207,7 +198,6 @@ final class HardwareMouse {
             guard let self, let mouse = note.object as? GCMouse else { return }
             self.releaseButtons()
             self.scrolls.removeValue(forKey: ObjectIdentifier(mouse))
-            self.trackpads.remove(ObjectIdentifier(mouse))
             self.mice.removeAll { $0 === mouse }
         })
         observers.append(NotificationCenter.default.addObserver(forName: UIPointerLockState.didChangeNotification, object: nil, queue: .main) { note in
@@ -234,44 +224,26 @@ final class HardwareMouse {
         }
         mice.removeAll()
         scrolls.removeAll()
-        trackpads.removeAll()
     }
 
     func releaseButtons() {
-        cancelTrackpadScroll()
         for button in buttons.releaseAll() { henge_vm_mouse_button(button, 0) }
-    }
-
-    func cancelTrackpadScroll() {
-        scrollFingers.cancel()
-        smoothDevice = nil
-    }
-
-    func setTouchscreenActive(_ active: Bool, source: ObjectIdentifier) {
-        if active {
-            touchscreenOwners.insert(source)
-            cancelTrackpadScroll()
-        } else {
-            touchscreenOwners.remove(source)
-        }
     }
 
     private func attach(_ mouse: GCMouse) {
         guard let input = mouse.mouseInput, !mice.contains(where: { $0 === mouse }) else { return }
         mice.append(mouse)
         let mouseID = ObjectIdentifier(mouse)
-        scrolls[mouseID] = PhysicalMouseScroll()
-        mouse.handlerQueue = .main // gesture timers and input ownership share this queue
-        let smooth = TrackpadScrollSettings.usesFingers(vendorName: mouse.vendorName)
-        if smooth { trackpads.insert(mouseID) }
-        HengeLog.log("input", "mouse: \(mouse.vendorName ?? "?"), right button \(input.rightButton != nil), middle \(input.middleButton != nil)")
-        HengeLog.log("input", "mouse scroll mode: \(smooth ? "trackpad fingers" : "wheel")")
+        let name = mouse.vendorName ?? "?"
+        scrolls[mouseID] = ScrollDevice(name: name)
+        mouse.handlerQueue = .main // serialize input with device connect/disconnect
+        HengeLog.log("input", "mouse: \(name), right button \(input.rightButton != nil), middle \(input.middleButton != nil), scroll mode: wheel")
         input.mouseMovedHandler = { [weak self] _, dx, dy in self?.moved(dx, dy) }
         input.leftButton.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(0, pressed) }
         input.rightButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(1, pressed) }
         input.middleButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(2, pressed) }
-        input.scroll.valueChangedHandler = { [weak self, weak input] _, first, second in
-            self?.scrolled(first, second, from: mouseID, sampleTimestamp: input?.lastEventTimestamp)
+        input.scroll.valueChangedHandler = { [weak self] _, first, second in
+            self?.scrolled(first, second, from: mouseID)
         }
     }
 
@@ -298,36 +270,18 @@ final class HardwareMouse {
 
     /// GameController puts vertical motion on the first axis and horizontal on the second.
     /// Accumulate fractional wheel units so slow finger movements remain controllable.
-    private func scrolled(_ first: Float, _ second: Float, from mouseID: ObjectIdentifier,
-                          sampleTimestamp: TimeInterval?) {
-        guard scrolls[mouseID] != nil else { return } // a queued callback after disconnect/stop
+    private func scrolled(_ first: Float, _ second: Float, from mouseID: ObjectIdentifier) {
+        guard var device = scrolls[mouseID] else { return }
         let defaults = UserDefaults.standard
-        if trackpads.contains(mouseID) {
-            guard touchscreenOwners.isEmpty else { return }
-            if smoothDevice != mouseID {
-                cancelTrackpadScroll()
-                smoothDevice = mouseID
-            }
-            let configured = defaults.object(forKey: TrackpadScrollSettings.key) == nil
-                ? TrackpadScrollSettings.defaultValue : defaults.double(forKey: TrackpadScrollSettings.key)
-            scrollFingers.scroll(first: first, second: second, sensitivity: configured, reversed: reverse,
-                                 sampleTimestamp: sampleTimestamp)
-            if trackpadLogs < 24 {
-                trackpadLogs += 1
-                HengeLog.log("input", "trackpad scroll raw: \(first), \(second); speed: \(configured)")
-            }
-            return
-        }
-        if first != 0 || second != 0 { cancelTrackpadScroll() }
         let configured = defaults.object(forKey: ScrollSensitivity.key) == nil
             ? ScrollSensitivity.defaultValue : defaults.double(forKey: ScrollSensitivity.key)
-        guard let wheel = scrolls[mouseID]?.consume(first: first, second: second,
-                                                   sensitivity: configured, reversed: reverse,
-                                                   timestamp: ProcessInfo.processInfo.systemUptime) else { return }
-        if wheelLogs < 24 {
-            wheelLogs += 1
-            HengeLog.log("input", "wheel scroll raw: \(first), \(second); speed: \(configured); units: \(wheel.dx), \(wheel.dy)")
+        let wheel = device.wheel.consume(first: first, second: second, sensitivity: configured,
+                                         reversed: reverse, timestamp: ProcessInfo.processInfo.systemUptime)
+        if device.logged < 24 {
+            device.logged += 1
+            HengeLog.log("input", "wheel scroll raw: \(first), \(second); speed: \(configured); units: \(wheel.dx), \(wheel.dy); device: \(device.name)")
         }
+        scrolls[mouseID] = device
         if wheel.dx != 0 || wheel.dy != 0 { henge_vm_mouse_scroll(wheel.dx, wheel.dy) }
     }
 }

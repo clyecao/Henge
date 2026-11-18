@@ -114,6 +114,7 @@ struct PhysicalMouseScrollTests {
             }
         }
         testSlowWheel()
+        testMagicKeyboardSwipe()
         testSustainedScrolling()
         testBurstsAndClock()
         print("PASS: physical mouse scrolling, \(checks) checks; slow detents and sustained rate")
@@ -141,6 +142,35 @@ struct PhysicalMouseScrollTests {
                                     timestamp: Double(i) * 0.025).dx
         }
         check((5...6).contains(detents), "a second of fine wheel motion must keep moving at minimum speed")
+    }
+
+    static func testMagicKeyboardSwipe() {
+        // 115 ms of vertical scrolling on an iPad14,6. GameController reports
+        // the second axis separately while repeating the first axis's value.
+        let samples: [(ms: Double, first: Float, second: Float)] = [
+            (0.00, 0.042037964, 0),       (6.03, 0.45173645, 0),
+            (14.37, 1.5735626, 0),        (24.11, 1.397522, 0),
+            (32.35, 0.86273193, 0),       (39.52, 1.4241333, 0),
+            (47.66, 1.8645935, 0),        (47.73, 1.8645935, 0.08061218),
+            (56.20, 1.2787476, 0.08061218), (56.25, 1.2787476, 0.14537048),
+            (64.52, 1.0619354, 0.14537048), (64.56, 1.0619354, 0.11050415),
+            (72.91, 1.6313477, 0.11050415), (72.95, 1.6313477, 0.16104126),
+            (81.21, 1.43396, 0.16104126), (81.25, 1.43396, 0),
+            (89.60, 1.4440155, 0),        (89.64, 1.4440155, 0.12904358),
+            (97.98, 1.4630127, 0.12904358), (98.03, 1.4630127, 0.11172485),
+            (105.94, 1.0835876, 0.11172485), (105.98, 1.0835876, 0),
+            (114.52, 0.9919281, 0),       (114.57, 0.9919281, 0.15281677),
+        ]
+        for (speed, steps) in [(0.3, [0, 2, 3, 5, 8, 16]), (0.05, [0])] {
+            var scroll = PhysicalMouseScroll()
+            for (i, sample) in samples.enumerated() {
+                let delta = scroll.consume(first: sample.first, second: sample.second, sensitivity: speed,
+                                           reversed: false, timestamp: sample.ms / 1000)
+                checkDelta(delta, 0, steps.contains(i) ? -1 : 0, "Magic Keyboard callback \(i) at \(speed)")
+            }
+            checkDelta(scroll.consume(first: 0, second: 0, sensitivity: speed, reversed: false, timestamp: 1),
+                       0, 0, "lifting fingers must not replay clipped wheel movement")
+        }
     }
 
     static func testSustainedScrolling() {

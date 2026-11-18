@@ -27,7 +27,6 @@ struct SessionView: View {
     @AppStorage("henge.cursor.scale") private var cursorScale = Device.isPad ? 1 : 3
     @AppStorage("henge.cursor.sharp") private var sharpCursor = true
     @AppStorage(ScrollSensitivity.key) private var scrollSpeed = ScrollSensitivity.defaultValue
-    @AppStorage(TrackpadScrollSettings.key) private var trackpadScrollSpeed = TrackpadScrollSettings.defaultValue
 
     @State private var typing = false
     @State private var zoomed = false
@@ -175,10 +174,7 @@ struct SessionView: View {
             zoomFollowing?.cancel()
             zoomFollowing = on ? Task { await followPointer() } : nil
         }
-        .onChange(of: pointerNeeded) {
-            PointerLock.set(!$0)
-            if $0 { HardwareMouse.shared.cancelTrackpadScroll() }
-        }
+        .onChange(of: pointerNeeded) { PointerLock.set(!$0) }
         .onChange(of: scenePhase) { phase in
             guard phase != .active else {
                 display.refresh()
@@ -508,11 +504,9 @@ struct SessionView: View {
                     }
                     .pickerStyle(.segmented)
                     Toggle("Sharp edges", isOn: $sharpCursor)
-                    LabeledContent("Mouse scroll speed", value: String(format: "%.2f×", scrollSpeed))
+                    LabeledContent("Scroll speed", value: String(format: "%.2f×", scrollSpeed))
                     Slider(value: $scrollSpeed, in: ScrollSensitivity.range)
-                    LabeledContent("Trackpad scroll speed", value: String(format: "%.2f×", trackpadScrollSpeed))
-                    Slider(value: $trackpadScrollSpeed, in: ScrollSensitivity.range)
-                    Text("The Mac supplies a small pointer image. Enlarging it can look blurry; 1× is the sharpest on an iPad. Scroll speed changes apply immediately.")
+                    Text("The Mac supplies a small pointer image. Enlarging it can look blurry. 1× is the sharpest on an iPad. Scroll speed applies immediately to connected mice and trackpads.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Sharing") {

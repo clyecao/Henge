@@ -202,6 +202,11 @@ int main(void) {
         /* Save again (the failed resume took the file), then resume it properly. */
         rc = henge_vm_boot(rom, disk, aux, 1, 0, 64, 2, error, sizeof error);
         usleep(30000);
+        /* Older iOS snapshots can contain both touchscreen and hardware scroll contacts. */
+        henge_vm_touch(1, 0, 1000, 1000, 100);
+        henge_vm_touch(14, 0, 3000, 2000, 100);
+        henge_vm_touch(15, 0, 3600, 2000, 100);
+        for (int i = 0; i < HV_TP_REPORTS; i++) henge_vm_touch_frame(101 + i);
         rc |= henge_vm_suspend(snap, "test", error, sizeof error);
         c2 = *(volatile uint64_t *)hv_vm_board()->ram;
         henge_vm_stop();
@@ -209,6 +214,17 @@ int main(void) {
         if (rc) fprintf(stderr, "resume: %s\n", error);
         check("resume starts the saved Mac", rc == 0 && henge_vm_state() == 1);
         check("the file is used once", access(snap, F_OK) != 0);
+        if (rc == 0) {
+            HvXhci *usb = hv_vm_board()->usb;
+            pthread_mutex_lock(&usb->mu);
+            unsigned stop = (usb->tp_rtail - 2) % HV_TP_REPORTS, last = (usb->tp_rtail - 1) % HV_TP_REPORTS;
+            const uint8_t *report = usb->tp_reports[stop];
+            check("resume delivers both old contacts lifting", usb->tp_rlen[stop] == 12 + 3 * 9 &&
+                  report[12 + 9 + 3] >> 5 == 7 && report[12 + 18 + 3] >> 5 == 7);
+            check("resume keeps the touchscreen contact", usb->tp_rlen[last] == 12 + 9 &&
+                  (usb->tp_reports[last][12 + 8] & 15) == 1 && usb->tp_reports[last][12 + 3] >> 5 == 4);
+            pthread_mutex_unlock(&usb->mu);
+        }
         count = (volatile uint64_t *)hv_vm_board()->ram;
         check("resumed: the counter is where it was", *count >= c2);
         for (int n = 0; n < 1000 && *count == c2; n++) usleep(1000);

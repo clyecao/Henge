@@ -1104,62 +1104,27 @@ void hv_xhci_touch_frame(HvXhci *x, uint32_t ts_ms) {
     hv_machine_wake(x->m);
 }
 
-/* IDs 12..15 belong to one hardware scroll gesture at a time. */
-static int tp_end_scroll_contacts(HvXhci *x, int first_id, uint32_t ts_ms) {
+void hv_xhci_release_legacy_scroll(HvXhci *x) {
+    if (!x) return;
+    pthread_mutex_lock(&x->mu);
     struct HvTpFinger *closing[HV_TP_FINGERS];
     int count = 0;
     for (int i = 0; i < HV_TP_FINGERS; i++) {
         struct HvTpFinger *f = &x->tp_fingers[i];
-        if (f->in && (f->id == first_id || f->id == first_id + 1)) {
+        /* iOS used IDs 12..15 to turn hardware scroll deltas into fingers. */
+        if (f->in && f->id >= 12 && f->id <= 15) {
             f->state = 7;
             closing[count++] = f;
         }
     }
-    if (!count) return 0;
-    /* Keep the stopped pair and final state deliverable even on a full ring. */
-    if (x->tp_rtail - x->tp_rhead > HV_TP_REPORTS - 2) x->tp_rhead = x->tp_rtail - (HV_TP_REPORTS - 2);
-    tp_queue(x, ts_ms);
-    for (int i = 0; i < count; i++) closing[i]->in = 0;
-    tp_queue(x, ts_ms);
-    return 1;
-}
-
-int hv_xhci_scroll_pair(HvXhci *x, int first_id, int phase, int left, int right, int y, uint32_t ts_ms) {
-    if (!x || (first_id != 12 && first_id != 14) || phase < 0 || phase > 2) return 0;
-    if (phase != 2 && (left < 0 || left >= right || right > HV_TP_SENSOR_X || y < 0 || y > HV_TP_SENSOR_Y)) return 0;
-    pthread_mutex_lock(&x->mu);
-    /* Advance absolute coordinates only when the guest has room for the report. */
-    int accepted = 0;
-    if (phase == 2) {
-        accepted = tp_end_scroll_contacts(x, first_id, ts_ms);
-    } else {
-        if (x->tp_rtail - x->tp_rhead >= 2) goto out;
-        struct HvTpFinger *pair[2] = {NULL, NULL};
-        int free_slots = 0;
-        for (int i = 0; i < HV_TP_FINGERS; i++) {
-            struct HvTpFinger *f = &x->tp_fingers[i];
-            if (phase == 0) {
-                /* A resumed snapshot may still hold an old hardware pair. Send
-                   its lift first, then retry placement on a fresh sample. */
-                if (f->in && f->id >= 12) {
-                    tp_end_scroll_contacts(x, f->id & ~1, ts_ms);
-                    goto out;
-                }
-                if (!f->in && free_slots < 2) pair[free_slots++] = f;
-            } else if (f->in && (f->id == first_id || f->id == first_id + 1)) {
-                pair[f->id - first_id] = f;
-            }
-        }
-        if (!pair[0] || !pair[1]) goto out;
-        for (int i = 0; i < 2; i++)
-            *pair[i] = (struct HvTpFinger){.in = 1, .id = first_id + i, .x = i ? right : left, .y = y, .state = 4};
-        tp_queue(x, ts_ms);
-        accepted = 1;
+    if (count) {
+        /* Make room for the stop and the remaining touchscreen state even on a full ring. */
+        if (x->tp_rtail - x->tp_rhead > HV_TP_REPORTS - 2) x->tp_rhead = x->tp_rtail - (HV_TP_REPORTS - 2);
+        tp_queue(x, x->tp_ts + 1);
+        for (int i = 0; i < count; i++) closing[i]->in = 0;
+        tp_queue(x, x->tp_ts + 1);
     }
-out:
     pthread_mutex_unlock(&x->mu);
-    if (accepted || phase == 0) hv_machine_wake(x->m);
-    return accepted;
 }
 
 void hv_xhci_touch_button(HvXhci *x, int down) {

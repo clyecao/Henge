@@ -225,6 +225,7 @@ static int boot_or_resume(const char *rom, const char *disk, const char *aux, ui
             fprintf(stderr, "henge: resume failed: %s\n", err);
             return failed_start();
         }
+        hv_xhci_release_legacy_scroll(hv_vm_board()->usb);
     }
     if (getenv("HV_STATS")) hv_vm_machine()->stats_interval = atoi(getenv("HV_STATS"));
     return started(err, errlen);
@@ -446,12 +447,6 @@ void henge_vm_touch_frame(uint32_t ts_ms) {
     if (!lock_running()) return;
     hv_vm_touch_frame(ts_ms);
     pthread_rwlock_unlock(&api_lock);
-}
-int henge_vm_scroll_pair(int first_id, int phase, int left, int right, int y, uint32_t ts_ms) {
-    if (!lock_running()) return 0;
-    int accepted = hv_xhci_scroll_pair(hv_vm_board()->usb, first_id, phase, left, right, y, ts_ms);
-    pthread_rwlock_unlock(&api_lock);
-    return accepted;
 }
 void henge_vm_touch_button(int down) {
     if (!lock_running()) return;
