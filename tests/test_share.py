@@ -1,5 +1,6 @@
 """Exercise the WebDAV endpoint Finder uses, including host edits between guest requests."""
 import ctypes
+from concurrent.futures import ThreadPoolExecutor
 import http.client
 import os
 from pathlib import Path
@@ -9,17 +10,51 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 
-def request(endpoint, method, body=b"", **headers):
+def request(endpoint, method, body=b"", path="/sample", **headers):
     conn = http.client.HTTPConnection("localhost", timeout=5)
     try:
         conn.sock = socket.socket(socket.AF_UNIX)
         conn.sock.settimeout(conn.timeout)
         conn.sock.connect(str(endpoint))
-        conn.request(method, "/sample", body, headers)
+        conn.request(method, path, body, headers)
         response = conn.getresponse()
         return response.status, response.headers, response.read()
     finally:
         conn.close()
+
+def test_battery(lib, endpoint):
+    lib.hv_share_set_battery.argtypes = [ctypes.c_int] * 3
+    lib.hv_share_set_clipboard.argtypes = [ctypes.c_char_p]
+
+    def poll(clipboard, revision=None):
+        path = f"/.henge/clipboard?since={clipboard}"
+        if revision is not None:
+            path += f"&battery={revision}"
+        status, headers, body = request(endpoint, "GET", path=path)
+        battery = list(map(int, headers["X-Henge-Battery"].split()))
+        return status, int(headers["X-Henge-Seq"]), battery, body
+
+    status, seq, initial, body = poll(2**63 - 1, 0)
+    assert (status, body, initial[1:]) == (204, b"", [-1, 0, 0])
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        pending = worker.submit(poll, seq, initial[0])
+        lib.hv_share_set_battery(74, 1, 1)
+        status, clip_seq, current, body = pending.result(timeout=6)
+        assert (status, clip_seq, current[1:], body) == (204, seq, [74, 1, 1], b"")
+        assert current[0] != initial[0]
+        lib.hv_share_set_battery(74, 1, 1)
+        assert poll(seq, 0)[2] == current
+
+        legacy = worker.submit(poll, seq)
+        lib.hv_share_set_battery(74, 2, 0)  # plugging in at the same percentage
+        lib.hv_share_set_clipboard(b"guest paste")
+        status, seq, charging, body = legacy.result(timeout=6)
+        assert (status, charging[1:], body) == (200, [74, 2, 0], b"guest paste")
+        assert poll(seq - 1, current[0]) == (200, seq, charging, b"guest paste")
+        lib.hv_share_set_battery(100, 3, 0)
+        assert poll(seq, charging[0])[2][1:] == [100, 3, 0]
+        lib.hv_share_set_battery(-1, 0, 0)
+        assert poll(seq, 0)[2][1:] == [-1, 0, 0]
 
 
 def test_share(root, endpoint):
@@ -80,5 +115,7 @@ if __name__ == "__main__":
         root.mkdir()
         endpoint = root.parent / "share.sock"
         assert lib.hv_share_start(bytes(root), bytes(endpoint), None) == 0
+        test_battery(lib, endpoint)
         test_share(root, endpoint)
+    print("Battery long poll: initial, charge transitions, unavailable and legacy clipboard passed")
     print("WebDAV: cache revalidation, conditional writes and property round-trip passed")

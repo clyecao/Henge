@@ -9,6 +9,12 @@
 #define HV_SHARE_ADDR "10.0.2.4"
 int hv_share_start(const char *folder, const char *socket_path, const char *agent);
 
+/* Values also carried in the guest helper's X-Henge-Battery header. */
+typedef enum {
+    HV_BATTERY_UNKNOWN, HV_BATTERY_UNPLUGGED, HV_BATTERY_CHARGING, HV_BATTERY_FULL
+} HvBatteryState;
+void hv_share_set_battery(int percent, HvBatteryState state, int low_power);
+
 /* The device's clipboard, for the guest to pick up. */
 void hv_share_set_clipboard(const char *text);
 /* What the guest last copied, once: a malloc'd string, or NULL if nothing is new. */

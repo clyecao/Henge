@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine
 
 /// What a running Mac shares with this device: the Shared folder in Files, and the clipboard. The Mac mounts
 /// the folder and follows the clipboard through a small helper (host/share.c, tools/henge-agent.m).
@@ -58,5 +59,51 @@ enum Sharing {
     /// have gone to a chat.
     static func typeSetUpCommand() async {
         await Keys.typeSlowly(setUpCommand)
+    }
+}
+
+/// Publish a fresh reading whenever the running Mac becomes visible, then follow UIKit notifications.
+struct SharedBattery: ViewModifier {
+    let active: Bool
+    @State private var previousMonitoring: Bool?
+
+    private func monitor(_ on: Bool) {
+        let device = UIDevice.current
+        if on {
+            if previousMonitoring == nil { previousMonitoring = device.isBatteryMonitoringEnabled }
+            device.isBatteryMonitoringEnabled = true
+            publish()
+        } else if let previousMonitoring {
+            device.isBatteryMonitoringEnabled = previousMonitoring
+            self.previousMonitoring = nil
+            hv_share_set_battery(-1, HV_BATTERY_UNKNOWN, 0)
+        }
+    }
+
+    private func publish() {
+        let device = UIDevice.current
+        let level = device.batteryLevel
+        let percent: Int32 = (0...1).contains(level) ? Int32((level * 100).rounded()) : -1
+        let state: HvBatteryState
+        switch device.batteryState {
+        case .charging: state = HV_BATTERY_CHARGING
+        case .full: state = HV_BATTERY_FULL
+        case .unplugged: state = HV_BATTERY_UNPLUGGED
+        default: state = HV_BATTERY_UNKNOWN
+        }
+        hv_share_set_battery(percent, state, ProcessInfo.processInfo.isLowPowerModeEnabled ? 1 : 0)
+    }
+
+    func body(content: Content) -> some View {
+        let notifications = NotificationCenter.default
+        content
+            .onChange(of: active, initial: true) { _, on in monitor(on) }
+            .onReceive(notifications.publisher(for: UIDevice.batteryLevelDidChangeNotification)
+                .merge(with: notifications.publisher(for: UIDevice.batteryStateDidChangeNotification),
+                       notifications.publisher(for: .NSProcessInfoPowerStateDidChange))
+                .receive(on: RunLoop.main)) { _ in
+                    if active { publish() }
+                }
+            .onDisappear { monitor(false) }
     }
 }

@@ -197,6 +197,7 @@ struct SessionView: View {
             VolumeClicks.shared.stop()
         }
         .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: mac.aspect)))
+        .modifier(SharedBattery(active: state == 1 && scenePhase == .active))
         .task(id: bootAttempt) { await run() }
         .task(id: microphone.enabled && scenePhase == .active) {
             if microphone.enabled && scenePhase == .active { await microphone.followGuest() }
@@ -504,17 +505,15 @@ struct SessionView: View {
                 }
                 Section("Sharing") {
                     LabeledContent("Clipboard and folder", value: helperRunning ? "On" : "Not set up")
-                    if !helperRunning {
-                        Button("Type the Set Up Command") {
-                            showDetails = false
-                            Task {
-                                try? await Task.sleep(nanoseconds: 600_000_000)
-                                await Sharing.typeSetUpCommand()
-                            }
+                    Button(helperRunning ? "Type the Helper Update Command" : "Type the Set Up Command") {
+                        showDetails = false
+                        Task {
+                            try? await Task.sleep(nanoseconds: 600_000_000)
+                            await Sharing.typeSetUpCommand()
                         }
                     }
                     Text(helperRunning
-                         ? "Put files in Files, Henge, Shared to see them in the Henge folder in this Mac's home folder. What you copy on the Mac is copied here too, and the paste button pastes from here into the Mac."
+                         ? "Files in Files › Henge › Shared appear in the Mac’s Henge folder. To add the device battery to the Mac’s menu bar, open Terminal on the Mac, type the helper update command using the button above, then press Return."
                          : "Once for each Mac: open Terminal on the Mac, tap this, then press Return. When macOS asks about henge-agent and local networks, choose Allow. It types \(Sharing.setUpCommand) and needs the Mac's keyboard layout to be U.S.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }

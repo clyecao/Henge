@@ -1,6 +1,7 @@
 // Runs inside macOS on a Henge virtual Mac, as a LaunchAgent. It keeps the clipboard in step with the device,
 // and keeps the shared folder mounted. It talks to host/share.c at 10.0.2.4, which only exists inside Henge.
 #import <AppKit/AppKit.h>
+#import "henge-battery.h"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -21,11 +22,12 @@ static int send_all(int fd, const void *p, size_t n) {
 }
 
 // One request on its own connection. A plain socket: the server is ours, and URLSession refuses plain HTTP.
-static NSData *request(NSString *method, NSString *path, NSData *body, int *status, unsigned long *seq) {
+static NSData *request(NSString *method, NSString *path, NSData *body, int *status, NSDictionary **replyHeaders) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return nil;
     struct timeval timeout = {.tv_sec = 40};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof timeout);
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof timeout);
     int on = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
     struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(80)};
@@ -43,36 +45,53 @@ static NSData *request(NSString *method, NSString *path, NSData *body, int *stat
     }
     NSMutableData *all = [NSMutableData data];
     char piece[16384];
-    for (;;) {
-        ssize_t got = recv(fd, piece, sizeof piece, 0);
-        if (got <= 0) break;
+    ssize_t got;
+    while ((got = recv(fd, piece, sizeof piece, 0)) > 0) {
         [all appendBytes:piece length:(NSUInteger)got];
     }
     close(fd);
+    if (got < 0) return nil;
     NSRange end = [all rangeOfData:[NSData dataWithBytes:"\r\n\r\n" length:4] options:0 range:NSMakeRange(0, all.length)];
     if (end.location == NSNotFound) return nil;
     NSString *headers = [[NSString alloc] initWithData:[all subdataWithRange:NSMakeRange(0, end.location)] encoding:NSUTF8StringEncoding];
-    if (sscanf(headers.UTF8String, "HTTP/1.1 %d", status) != 1) return nil;
-    NSRange found = [headers rangeOfString:@"X-Henge-Seq: "];
-    if (found.location != NSNotFound && seq) *seq = strtoul(headers.UTF8String + NSMaxRange(found), NULL, 10);
+    if (!headers || sscanf(headers.UTF8String, "HTTP/1.1 %d", status) != 1) return nil;
+    if (replyHeaders) {
+        NSMutableDictionary *fields = [NSMutableDictionary dictionary];
+        for (NSString *line in [headers componentsSeparatedByString:@"\r\n"]) {
+            NSRange colon = [line rangeOfString:@":"];
+            if (colon.location == NSNotFound) continue;
+            NSString *name = [[line substringToIndex:colon.location] lowercaseString];
+            fields[name] = [[line substringFromIndex:NSMaxRange(colon)] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        }
+        *replyHeaders = fields;
+    }
     NSUInteger start = NSMaxRange(end);
     return [all subdataWithRange:NSMakeRange(start, all.length - start)];
 }
 
 static NSInteger lastChange;
+static HengeBatteryItem *batteryItem;
 
-// The device's clipboard, as it changes. The server holds each request until there is something new.
+// One long poll carries independent clipboard and battery revisions. An initial 204 includes the host battery.
 static void followDevice(void) {
-    unsigned long seq = 0;
-    for (BOOL first = YES;; first = NO) {
+    unsigned long seq = ULONG_MAX >> 1, batteryRevision = 0;
+    BOOL first = YES;
+    while (YES) @autoreleasepool {
         int status = 0;
-        unsigned long now = seq;
-        NSData *body = request(@"GET", [NSString stringWithFormat:@"/.henge/clipboard?since=%lu", first ? ULONG_MAX >> 1 : seq], nil, &status, &now);
-        if (!body) {
+        NSString *path = [NSString stringWithFormat:@"/.henge/clipboard?since=%lu&battery=%lu", seq, batteryRevision];
+        NSDictionary *headers = nil;
+        NSData *body = request(@"GET", path, nil, &status, &headers);
+        HengeBatteryReading reading = {-1, HV_BATTERY_UNKNOWN, NO};
+        BOOL success = body && (status == 200 || status == 204) && headers[@"x-henge-seq"];
+        if (!success || !HengeParseBattery(headers[@"x-henge-battery"], &batteryRevision, &reading)) batteryRevision = 0;
+        dispatch_async(dispatch_get_main_queue(), ^{ [batteryItem update:reading]; });
+        if (!success) {
             sleep(5);
             continue;
         }
+        unsigned long now = strtoul([headers[@"x-henge-seq"] UTF8String], NULL, 10);
         BOOL news = !first && status == 200 && now != seq;
+        first = NO;
         seq = now; // what the device had before this helper started isn't news
         if (!news) continue;
         NSString *text = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
@@ -120,12 +139,14 @@ static void keepMounted(void) {
 
 int main(void) {
     @autoreleasepool {
+        [NSApplication.sharedApplication setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        batteryItem = [HengeBatteryItem new];
         lastChange = NSPasteboard.generalPasteboard.changeCount;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ followDevice(); });
         keepMounted();
         [NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer) { (void)timer; checkClipboard(); }];
         [NSTimer scheduledTimerWithTimeInterval:30 repeats:YES block:^(NSTimer *timer) { (void)timer; keepMounted(); }];
-        [NSRunLoop.mainRunLoop run];
+        [NSApp run];
     }
     return 0;
 }

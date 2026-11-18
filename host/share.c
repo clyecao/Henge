@@ -46,6 +46,24 @@ static char *device_clip; /* the device's, for the guest */
 static unsigned long device_seq;
 static char *guest_clip; /* the guest's, until the device takes it */
 static time_t agent_seen;
+static unsigned long battery_seq = 1; /* zero requests the initial snapshot */
+static int battery_percent = -1, battery_low_power;
+static HvBatteryState battery_state = HV_BATTERY_UNKNOWN;
+
+void hv_share_set_battery(int percent, HvBatteryState state, int low_power) {
+    if (percent < 0 || percent > 100) percent = -1;
+    if ((unsigned)state > HV_BATTERY_FULL) state = HV_BATTERY_UNKNOWN;
+    low_power = !!low_power;
+    pthread_mutex_lock(&clip_mu);
+    if (percent != battery_percent || state != battery_state || low_power != battery_low_power) {
+        battery_percent = percent;
+        battery_state = state;
+        battery_low_power = low_power;
+        battery_seq++;
+        pthread_cond_broadcast(&clip_cond);
+    }
+    pthread_mutex_unlock(&clip_mu);
+}
 
 void hv_share_set_clipboard(const char *text) {
     pthread_mutex_lock(&clip_mu);
@@ -894,13 +912,16 @@ static int do_lock(Conn *c, Request *r) {
 /* What "curl -s http://10.0.2.4/.henge/install | sh" runs in macOS. */
 static const char install_script[] =
     "#!/bin/sh\n"
+    "set -e\n"
     "D=\"$HOME/Library/Application Support/Henge\"\n"
     "P=\"$HOME/Library/LaunchAgents/com.henge.agent.plist\"\n"
     "mkdir -p \"$D\" \"$HOME/Library/LaunchAgents\"\n"
-    "launchctl bootout \"gui/$(id -u)/com.henge.agent\" 2>/dev/null\n"
-    "curl -fsS http://" HV_SHARE_ADDR "/.henge/agent | gunzip > \"$D/henge-agent\" || { echo 'Could not reach Henge.'; exit 1; }\n"
-    "chmod 755 \"$D/henge-agent\"\n"
-    "cat > \"$P\" <<EOF\n"
+    "stage=$(mktemp -d \"$D/install.XXXXXX\")\n"
+    "trap 'rm -rf \"$stage\"' EXIT\n"
+    "curl -fsS http://" HV_SHARE_ADDR "/.henge/agent -o \"$stage/agent.gz\"\n"
+    "gunzip -c \"$stage/agent.gz\" > \"$stage/henge-agent\"\n"
+    "chmod 755 \"$stage/henge-agent\"\n"
+    "cat > \"$stage/agent.plist\" <<EOF\n"
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
     "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
     "<plist version=\"1.0\"><dict>\n"
@@ -911,6 +932,9 @@ static const char install_script[] =
     "<key>ProcessType</key><string>Background</string>\n"
     "</dict></plist>\n"
     "EOF\n"
+    "mv -f \"$stage/henge-agent\" \"$D/henge-agent\"\n"
+    "mv -f \"$stage/agent.plist\" \"$P\"\n"
+    "launchctl bootout \"gui/$(id -u)/com.henge.agent\" 2>/dev/null || true\n"
     "launchctl bootstrap \"gui/$(id -u)\" \"$P\"\n"
     "echo 'Henge is set up. You can close this window.'\n";
 
@@ -982,12 +1006,14 @@ static int serve_agent(Conn *c, Request *r) {
     return rc;
 }
 
-/* GET ?since=N waits up to 25 s for a newer clipboard than N. */
+/* The optional battery revision lets the same long poll wake without replaying clipboard text. */
 static int clipboard_get(Conn *c, Request *r) {
     if (body_discard(c, r) != 0) return -1;
     unsigned long since = 0;
     const char *q = strstr(r->query, "since=");
     if (q) since = strtoul(q + 6, NULL, 10);
+    const char *battery = strstr(r->query, "&battery=");
+    unsigned long seen_battery = battery ? strtoul(battery + 9, NULL, 10) : 0;
     struct timespec until;
     struct timeval now;
     gettimeofday(&now, NULL);
@@ -995,13 +1021,16 @@ static int clipboard_get(Conn *c, Request *r) {
     until.tv_nsec = now.tv_usec * 1000;
     pthread_mutex_lock(&clip_mu);
     agent_seen = time(NULL);
-    while (device_seq <= since && pthread_cond_timedwait(&clip_cond, &clip_mu, &until) != ETIMEDOUT) {}
+    while (device_seq <= since && (!battery || seen_battery == battery_seq)) {
+        if (pthread_cond_timedwait(&clip_cond, &clip_mu, &until) != 0) break;
+    }
     agent_seen = time(NULL);
     unsigned long seq = device_seq;
     char *text = seq > since && device_clip ? strdup(device_clip) : NULL;
+    char headers[160];
+    snprintf(headers, sizeof headers, "X-Henge-Seq: %lu\r\nX-Henge-Battery: %lu %d %d %d\r\n",
+             seq, battery_seq, battery_percent, (int)battery_state, battery_low_power);
     pthread_mutex_unlock(&clip_mu);
-    char headers[64];
-    snprintf(headers, sizeof headers, "X-Henge-Seq: %lu\r\n", seq);
     int rc = text ? respond(c, r, 200, "OK", headers, text, strlen(text)) : respond(c, r, 204, "No Content", headers, NULL, 0);
     free(text);
     return rc;

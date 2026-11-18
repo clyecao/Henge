@@ -54,6 +54,8 @@ Do this once for each Mac: open Terminal on the Mac, then in Henge open Details 
 
 Then a Henge folder in the Mac's home folder is the same folder as Files › Henge › Shared. What you copy on the Mac is copied on the device too, and the paste button pastes from the device into the Mac.
 
+The helper also shows the host device’s battery in the Mac menu bar. Click the battery to see its power source or toggle **Show Percentage**. To update an existing helper, open Terminal in the VM, choose **Details → Sharing → Type the Helper Update Command** in Henge, then press Return in Terminal.
+
 ## Known limits
 
 - Signing in to an Apple Account inside macOS fails with a verification error.
