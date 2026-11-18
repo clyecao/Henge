@@ -388,6 +388,10 @@ static void test_virtio_net(void) {
     board.net->transmit = capture_tx;
     uint64_t rxq = ring, txq = ring + 0x4000, buf = VMAPPLE_MEM + 0x400000;
     /* transmit: 12-byte header + 60-byte frame */
+    HvRam *region = hv_ram_lookup(&m, buf);
+    uint64_t page = (buf - region->pa) >> HV_TLB_PAGE_BITS;
+    uint32_t generation = region->page_gen[page], next_generation = region->page_gen[page + 1];
+    region->code_pages[page] = region->code_pages[page + 1] = 1;
     memset(ram(buf), 0, 12);
     for (int i = 0; i < 60; i++) ram(buf + 12)[i] = (uint8_t)i;
     put_desc(txq, 0, buf, 72, 0, 0);
@@ -395,15 +399,19 @@ static void test_virtio_net(void) {
     wr16(bar + 0x3000 + 4, 1);
     check("TX frame length", sent_len, 60);
     check("TX frame bytes", sent[59], 59);
+    check("reading a guest buffer keeps its translations", region->page_gen[page], generation);
     /* receive */
     uint8_t frame[64];
     for (int i = 0; i < 64; i++) frame[i] = (uint8_t)(0xa0 + i);
     check("RX with no buffer drops", hv_virtio_net_receive(board.net, frame, 64), 0);
-    put_desc(rxq, 0, buf + 0x1000, 2048, 2, 0);
+    uint64_t rx = buf + (1ull << HV_TLB_PAGE_BITS) - 32;
+    put_desc(rxq, 0, rx, 2048, 2, 0);
     offer(rxq, 0);
     wr16(bar + 0x3000, 0);
     check("RX delivered", hv_virtio_net_receive(board.net, frame, 64), 1);
-    check("RX bytes", memcmp(ram(buf + 0x1000 + 12), frame, 64), 0);
+    check("RX bytes", memcmp(ram(rx + 12), frame, 64), 0);
+    check("RX invalidated first translated page", region->page_gen[page], generation + 1);
+    check("RX invalidated second translated page", region->page_gen[page + 1], next_generation + 1);
     uint32_t used_len;
     memcpy(&used_len, ram(rxq + 0x2000 + 8), 4);
     check("RX used length", used_len, 76);
