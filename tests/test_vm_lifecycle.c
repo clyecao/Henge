@@ -71,6 +71,9 @@ static void *read_ui(void *unused) {
         henge_vm_pointer(&x, &y);
         henge_vm_cpus_on();
         henge_vm_gpu_frames();
+        henge_vm_microphone_requested();
+        const float sample = 0.25f;
+        henge_vm_microphone(0, &sample, 1);
         henge_vm_balloon(-1);
         henge_vm_set_display_layer(NULL);
         if (!henge_vm_boot_display(&pixels, &width, &height, &stride)) henge_vm_free_display(pixels);
@@ -78,6 +81,54 @@ static void *read_ui(void *unused) {
     }
     return NULL;
 }
+/* Seed a partly filled guest RX descriptor while the test VM is paused. */
+static void seed_microphone(void) {
+    HvVmapple *b = hv_vm_board();
+    HvVirtioSnd *s = b->snd;
+    const uint64_t base = 0x70000000;
+    memset(b->ram + 0x10000, 0, 0x5000);
+    s->vio.status = 4;
+    s->vio.q[3] = (HvVirtq){.size = 8, .enabled = 1, .last_avail = 1,
+        .desc = base + 0x10000, .avail = base + 0x11000, .used = base + 0x12000};
+    s->vio.q[3].out[0] = 1;
+    *(uint16_t *)(b->ram + 0x11002) = 1;
+    *(uint32_t *)(b->ram + 0x13000) = 1;
+    memset(b->ram + 0x14000, 0x42, 64);
+    s->capture.format = HV_VSND_FMT_FLOAT;
+    s->capture.frame_bytes = 4;
+    s->capture.buffer_bytes = 7680;
+    s->capture.period_bytes = 1920;
+    s->capture.prepared = s->capture.running = s->capture.enabled = 1;
+    s->capture.head = 7; s->capture.tail = 8; s->capture.offset = 64;
+    s->capture.pending[7] = (HvVirtqElem){.head = 0, .nseg = 2,
+        .seg = {{base + 0x13000, 4, 0}, {base + 0x14000, 1928, 1}}};
+    s->capture.delivered = 480000;
+    s->capture.samples[0] = 0.75f;
+    s->capture.written = 1;
+}
+
+static void check_microphone_resume(void) {
+    HvVmapple *b = hv_vm_board();
+    HvVirtioSnd *s = b->snd;
+    for (int n = 0; n < 200 && *(volatile uint16_t *)(b->ram + 0x12002) == 0; n++) usleep(1000);
+    pthread_mutex_lock(&s->capture_mu);
+    check("resumed RX period completes once", *(uint16_t *)(b->ram + 0x12002) == 1 && s->capture.head == 8 && s->capture.tail == 8);
+    check("resumed microphone has a fresh clock and no saved permission", s->capture.delivered < 48000 && !s->capture.enabled && !s->capture.written);
+    check("RX partial samples survive", b->ram[0x14000] == 0x42 && b->ram[0x1403f] == 0x42);
+    check("resumed microphone emits gated silence", *(float *)(b->ram + 0x14040) == 0 && *(uint32_t *)(b->ram + 0x14780) == 0x8000);
+    pthread_mutex_unlock(&s->capture_mu);
+    const float sample = 0.5f;
+    uint64_t generation = henge_vm_generation();
+    check("macOS still requests recording", henge_vm_microphone_requested());
+    henge_vm_microphone_enable(1);
+    henge_vm_microphone(generation - 1, &sample, 1);
+    henge_vm_microphone(generation, &sample, 1);
+    pthread_mutex_lock(&s->capture_mu);
+    check("only the current VM's microphone callback is accepted", s->capture.written == 1 && s->capture.samples[0] == sample);
+    pthread_mutex_unlock(&s->capture_mu);
+    henge_vm_microphone_enable(0);
+}
+
 int main(void) {
     alarm(60);
     char dir[] = "/tmp/henge-lifecycle-XXXXXX", rom[256], disk[256], aux[256], ram[256], error[256];
@@ -185,8 +236,10 @@ int main(void) {
         uint64_t c1 = *count;
         usleep(20000);
         check("paused: the counter stands still", c1 > 0 && *count == c1);
+        seed_microphone();
         check("continue runs it on", henge_vm_continue() == 0 && henge_vm_state() == 1);
         for (int n = 0; n < 1000 && *count == c1; n++) usleep(1000);
+        check_microphone_resume();
         check("continued: the counter moves", *count > c1);
         rc = henge_vm_suspend(snap, "test", error, sizeof error);
         uint64_t c2 = *count;
@@ -207,7 +260,9 @@ int main(void) {
         henge_vm_touch(14, 0, 3000, 2000, 100);
         henge_vm_touch(15, 0, 3600, 2000, 100);
         for (int i = 0; i < HV_TP_REPORTS; i++) henge_vm_touch_frame(101 + i);
-        rc |= henge_vm_suspend(snap, "test", error, sizeof error);
+        rc |= henge_vm_pause(error, sizeof error);
+        seed_microphone();
+        rc |= henge_vm_save(snap, "test", error, sizeof error);
         c2 = *(volatile uint64_t *)hv_vm_board()->ram;
         henge_vm_stop();
         rc |= henge_vm_resume(rom, disk, aux, 1, 0, 64, 2, snap, "test", error, sizeof error);
@@ -215,6 +270,7 @@ int main(void) {
         check("resume starts the saved Mac", rc == 0 && henge_vm_state() == 1);
         check("the file is used once", access(snap, F_OK) != 0);
         if (rc == 0) {
+            check_microphone_resume();
             HvXhci *usb = hv_vm_board()->usb;
             pthread_mutex_lock(&usb->mu);
             unsigned stop = (usb->tp_rtail - 2) % HV_TP_REPORTS, last = (usb->tp_rtail - 1) % HV_TP_REPORTS;

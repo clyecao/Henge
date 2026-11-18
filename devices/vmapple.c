@@ -370,7 +370,7 @@ void hv_vmapple_destroy(HvVmapple *b) {
         pthread_cond_destroy(&b->vusb->cv);
         free(b->vusb);
     }
-    if (b->snd) { free(b->snd->ring); free(b->snd); }
+    hv_virtio_snd_destroy(b->snd);
     free(b->balloon);
     if (b->keyboard) { pthread_mutex_destroy(&b->keyboard->mu); free(b->keyboard); }
     if (b->mouse) { pthread_mutex_destroy(&b->mouse->mu); free(b->mouse); }

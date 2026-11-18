@@ -485,6 +485,27 @@ int henge_vm_boot_display(const uint8_t **pixels, int *width, int *height, int *
 }
 void henge_vm_free_display(const uint8_t *pixels) { free((void *)pixels); }
 
+int henge_vm_microphone_requested(void) {
+    if (!lock_running()) return 0;
+    int requested = hv_virtio_snd_capture_requested(hv_vm_board()->snd);
+    pthread_rwlock_unlock(&api_lock);
+    return requested;
+}
+
+void henge_vm_microphone_enable(int enabled) {
+    if (!lock_running()) return;
+    hv_virtio_snd_capture_enable(hv_vm_board()->snd, enabled);
+    pthread_rwlock_unlock(&api_lock);
+}
+
+void henge_vm_microphone(uint64_t session, const float *samples, uint32_t frames) {
+    /* The audio callback can outlive a VM. Never wait for save or teardown on the audio thread. */
+    if (state != 1 || pthread_rwlock_tryrdlock(&api_lock) != 0) return;
+    if (state == 1 && session == atomic_load(&generation))
+        hv_virtio_snd_capture_push(hv_vm_board()->snd, samples, frames);
+    pthread_rwlock_unlock(&api_lock);
+}
+
 #if TARGET_OS_IPHONE
 size_t henge_available_memory(void) { return os_proc_available_memory(); }
 #else

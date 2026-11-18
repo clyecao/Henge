@@ -63,6 +63,21 @@ the packager as an environment variable (`HENGE_ENTITLEMENTS=... ios/scripts/pac
 - **Chips**: the virtual CPU offers Armv8.5 instructions (`core/sysreg.c`), which
   macOS uses and which run as they are, so Henge needs an A14 or M1 or newer.
 
+## Using the device microphone
+
+In the running Mac, open **ⓘ → Microphone → Share microphone** and allow Henge
+to record. In macOS, choose **System Settings → Sound → Input → Apple Virtual
+Sound Device**. To check the full path, speak into the iPhone or iPad and make
+a short audio recording in QuickTime Player.
+
+Sharing defaults to off for each session. When a Mac app requests input, Henge
+captures the current audio route at its hardware rate and supplies 48 kHz mono
+to the VM. Switching off sharing or leaving the foreground stops capture.
+The Mac receives paced silence while the host microphone is unavailable.
+The input stream and its partial periods survive Instant Resume within a build.
+Run `make test-microphone test-vm-lifecycle` for capture and resume tests.
+The microphone implementation is adapted from [upstream PR #100](https://github.com/Leviidev/Henge/pull/100).
+
 ## Choosing a new Mac's disk
 
 The Install tab offers 64, 128, 256 and 512 GiB, defaulting to 128 GiB (upstream

@@ -506,6 +506,12 @@ static void save_devices(W *w, HvVmapple *b) {
         uint64_t wc[4] = {atomic_load(&d->written), atomic_load(&d->consumed), d->underruns, d->xfers};
         w_section(w, VSND, wc, sizeof wc);
         w_section(w, VSND, RANGE(d, pending, ptail));
+        /* Save the guest's recording format and outstanding RX buffers.
+           Host microphone samples and the permission to capture are session-owned. */
+        pthread_mutex_lock(&d->capture_mu);
+        w_section(w, VSND, RANGE(&d->capture, format, running));
+        w_section(w, VSND, RANGE(&d->capture, pending, offset));
+        pthread_mutex_unlock(&d->capture_mu);
     }
     if (b->balloon) {
         save_virtio(w, VBAL, &b->balloon->vio);
@@ -566,6 +572,7 @@ static int load_devices(R *r, HvVmapple *b, void **display, uint64_t *display_le
             return -1;
         atomic_store(&d->written, wc[0]), atomic_store(&d->consumed, wc[1]);
         d->underruns = wc[2], d->xfers = wc[3];
+        if (R_RANGE(r, VSND, &d->capture, format, running) || R_RANGE(r, VSND, &d->capture, pending, offset)) return -1;
     }
     if (b->balloon && (load_virtio(r, VBAL, &b->balloon->vio) || R_RANGE(r, VBAL, b->balloon, target, told_pattern))) return -1;
     HvVirtioInput *in[2] = {b->keyboard, b->mouse};

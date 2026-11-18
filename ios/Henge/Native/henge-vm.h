@@ -105,6 +105,12 @@ int henge_vm_pointer(int *x, int *y);
 /* A small picture of the display, BGRA, width * height * 4 bytes. 0, or -1 before anything shows. */
 int henge_vm_snapshot(uint8_t *bgra, int width, int height);
 
+/* The guest can request 48 kHz mono input while the host microphone is off.
+   Only samples captured for the current VM generation may enter its input ring. */
+int henge_vm_microphone_requested(void);
+void henge_vm_microphone_enable(int enabled);
+void henge_vm_microphone(uint64_t generation, const float *samples, uint32_t frames);
+
 /* The boot framebuffer (Apple logo and progress bar), 32-bit BGRA, or -1 if
    the kernel has not got that far. A successful call returns an owned copy;
    release it with henge_vm_free_display after use. */

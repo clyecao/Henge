@@ -9,6 +9,7 @@ struct SessionView: View {
     let close: () -> Void
 
     @StateObject private var display = DisplayRouter()
+    @StateObject private var microphone = GuestMicrophone()
     @State private var error: String?
     @State private var state: Int32 = 0
     @State private var bootAttempt = 0
@@ -176,6 +177,7 @@ struct SessionView: View {
         }
         .onChange(of: pointerNeeded) { PointerLock.set(!$0) }
         .onChange(of: scenePhase) { phase in
+            microphone.setForeground(phase == .active)
             guard phase != .active else {
                 display.refresh()
                 InstantResume.cameBack(mac)
@@ -194,11 +196,13 @@ struct SessionView: View {
             if showing { HardwareKeys.releaseAll(); StickyKeys.shared.releaseAll() }
         }
         .onAppear {
+            microphone.setForeground(scenePhase == .active)
             UIApplication.shared.isIdleTimerDisabled = true
             HardwareMouse.shared.start()
             VolumeClicks.shared.start()
         }
         .onDisappear {
+            microphone.setForeground(false)
             UIApplication.shared.isIdleTimerDisabled = false
             zoomFollowing?.cancel()
             StickyKeys.shared.releaseAll()
@@ -208,6 +212,9 @@ struct SessionView: View {
         }
         .modifier(ExternalMacDisplayModifier(presentation: MacPresentation(display: display, aspect: mac.aspect)))
         .task(id: bootAttempt) { await run() }
+        .task(id: microphone.enabled && scenePhase == .active) {
+            if microphone.enabled && scenePhase == .active { await microphone.followGuest() }
+        }
         .task { await Sharing.followMacClipboard() }
     }
 
@@ -523,6 +530,12 @@ struct SessionView: View {
                     Text(helperRunning
                          ? "Put files in Files, Henge, Shared to see them in the Henge folder in this Mac's home folder. What you copy on the Mac is copied here too, and the paste button pastes from here into the Mac."
                          : "Once for each Mac: open Terminal on the Mac, tap this, then press Return. When macOS asks about henge-agent and local networks, choose Allow. It types \(Sharing.setUpCommand) and needs the Mac's keyboard layout to be U.S.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("Microphone") {
+                    Toggle("Share microphone", isOn: $microphone.enabled)
+                    if microphone.enabled { LabeledContent("Microphone sharing", value: microphone.status) }
+                    Text("Choose Apple Virtual Sound Device as the input in the Mac app. Recording starts when the Mac uses the microphone.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Lighter macOS") {

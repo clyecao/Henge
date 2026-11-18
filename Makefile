@@ -13,7 +13,7 @@ METAL_LIBS = -framework Foundation -framework QuartzCore -framework Metal -frame
 
 TESTS = $(B)/test_classify $(B)/test_jit_region $(B)/test_operands $(B)/test_jit $(B)/test_mem \
         $(B)/test_mmu $(B)/test_exc $(B)/test_devices $(B)/test_dt_fixup $(B)/test_shutdown $(B)/test_jit_cache \
-        $(B)/test_encoding $(B)/test_undefined $(B)/test_pvg_surface $(B)/test_pvg_mapper
+        $(B)/test_encoding $(B)/test_undefined $(B)/test_pvg_surface $(B)/test_pvg_mapper $(B)/test_microphone
 
 all: $(TESTS) $(B)/hengevm $(B)/hengevm-ref $(B)/hvsparse
 
@@ -120,6 +120,13 @@ $(B)/test_mouse_reports: tests/test_mouse_reports.c $(ENGINE) $(DEV) $(B)/vm.o $
 test-mouse-reports: $(B)/test_mouse_reports
 	$(B)/test_mouse_reports
 .PHONY: test-mouse-reports
+
+$(B)/test_microphone: tests/test_microphone.c $(ENGINE) $(B)/virtio_snd.o $(B)/virtio.o $(B)/pcie.o $(B)/gicv3.o
+	$(CC) $(CFLAGS) $^ -o $@
+
+test-microphone: $(B)/test_microphone
+	$(B)/test_microphone
+.PHONY: test-microphone
 
 $(B)/test_pvg_lifecycle: tests/test_pvg_lifecycle.m $(ENGINE) $(DEV)
 	$(CC) $(CFLAGS) -fobjc-arc $^ $(METAL_LIBS) -o $@

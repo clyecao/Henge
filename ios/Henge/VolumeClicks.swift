@@ -262,6 +262,7 @@ final class VolumeClicks: NSObject {
             return
         }
         let session = AVCaptureSession()
+        session.automaticallyConfiguresApplicationAudioSession = false // This video-only session watches the volume buttons.
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
               let input = try? AVCaptureDeviceInput(device: device),
               session.canAddInput(input) else {
