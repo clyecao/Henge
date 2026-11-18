@@ -12,13 +12,20 @@ import UIKit
 ///    down so moving drags. These go out as mouse buttons alongside the pad's fingers.
 ///  - Volume buttons: the surface only points and gestures; the clicks live on the
 ///    volume keys (VolumeClicks), so a tap here does nothing.
-/// Only fingers count: a real trackpad or mouse goes through HardwareMouse.
+/// Fingers drive the pad. An unlocked hardware pointer uses the display's absolute coordinates.
 struct Trackpad: UIViewRepresentable {
     /// Four fingers tapped together: the session shows its hidden controls.
     static let revealTap = Notification.Name("henge.trackpad.revealTap")
 
+    var screen: CGRect? = nil // Guest display in this surface's coordinates. The separate portrait pad has none.
+    var external = false
+
     func makeUIView(context: Context) -> Surface { Surface() }
-    func updateUIView(_ view: Surface, context: Context) {}
+    func updateUIView(_ view: Surface, context: Context) {
+        view.screen = screen
+        view.external = external
+        view.bindWindow()
+    }
 
     final class Surface: UIView, UIPointerInteractionDelegate {
         /// The emulated pad's sensor, in the Magic Trackpad 2's own units.
@@ -36,6 +43,8 @@ struct Trackpad: UIViewRepresentable {
         private var travelled: CGFloat = 0
         private var mostFingers = 0
         private var touchesLogged = 0
+        var screen: CGRect?
+        var external = false
 
         /* Touchscreen-mode clicking. */
         private var holding = false
@@ -48,6 +57,32 @@ struct Trackpad: UIViewRepresentable {
             isMultipleTouchEnabled = true
             backgroundColor = .clear
             addInteraction(UIPointerInteraction(delegate: self))
+            let hover = UIHoverGestureRecognizer(target: self, action: #selector(hovered(_:)))
+            hover.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+            addGestureRecognizer(hover)
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            bindWindow()
+        }
+
+        func bindWindow() {
+            if screen != nil, let window { PointerLock.bind(window, localDisplay: !external) }
+        }
+
+        @objc private func hovered(_ hover: UIHoverGestureRecognizer) {
+            if hover.state == .began || hover.state == .changed { point(at: hover.location(in: self)) }
+        }
+
+        private func point(at location: CGPoint) {
+            guard let screen, window === PointerLock.window, PointerLock.route == .absolute,
+                  let p = PhysicalPointerRoute.position(location, in: screen) else { return }
+            henge_vm_pointer_at(p.x, p.y)
+        }
+
+        private func pointDuringClick(_ touches: Set<UITouch>) {
+            if let t = touches.first(where: { $0.type == .indirectPointer }) { point(at: t.location(in: self)) }
         }
 
         /// Over the Mac there is only the Mac's pointer, if iPadOS hasn't locked its own away.
@@ -84,6 +119,7 @@ struct Trackpad: UIViewRepresentable {
         private static func ms(_ t: TimeInterval) -> UInt32 { UInt32(truncatingIfNeeded: Int(t * 1000)) }
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            pointDuringClick(touches)
             let touches = touches.filter { $0.type != .indirectPointer }
             guard !touches.isEmpty else { return }
             if fingers.isEmpty {
@@ -117,6 +153,7 @@ struct Trackpad: UIViewRepresentable {
         }
 
         override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+            pointDuringClick(touches)
             var moved = false
             let ts = Self.ms(event?.timestamp ?? touches.first?.timestamp ?? 0)
             for t in touches where t.type != .indirectPointer {
@@ -134,7 +171,10 @@ struct Trackpad: UIViewRepresentable {
             if moved { henge_vm_touch_frame(ts) }
         }
 
-        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { lift(touches) }
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+            pointDuringClick(touches)
+            lift(touches)
+        }
         override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { lift(touches) }
 
         private func lift(_ touches: Set<UITouch>) {

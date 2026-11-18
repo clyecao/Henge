@@ -1,6 +1,7 @@
 #include "vm.h"
 
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +101,41 @@ static void verify_reports(HvVirtioInput *mouse) {
     pthread_mutex_unlock(&mouse->mu);
 }
 
+/* Offer one interrupt transfer after several host positions. A returning iPad pointer can
+   start at the opposite corner; the guest should receive only the latest absolute position. */
+static void verify_absolute_pointer(HvVmapple *board) {
+    HvXhci *usb = board->usb;
+    HvPciDev *pci = &usb->pci;
+    check("controller and USB 2 protocol both expose three ports",
+          (pci->bar_read(pci, 0, 4, 4) >> 24) == 3 && pci->bar_read(pci, 0, 0x808, 4) == 0x301);
+    check("absolute pointer port connected at full speed", (pci->bar_read(pci, 0, 0x460, 4) & 0x3c01) == 0x401);
+    uint64_t ring = VMAPPLE_MEM + 0x4000, buf = VMAPPLE_MEM + 0x5000;
+    uint32_t transfer[4] = {(uint32_t)buf, (uint32_t)(buf >> 32), 5, (1u << 10) | 1u};
+    int slot = 3, ep = 3; /* the pointer's interrupt IN endpoint */
+    usb->slots[slot].dev = 2;
+    usb->slots[slot].ep_running[ep] = 1;
+    usb->slots[slot].ep[ep].dequeue = ring;
+    usb->slots[slot].ep[ep].ccs = 1;
+    hv_vm_pointer_at(0.5, 0.5);
+    hv_vm_pointer_at(-1, 2);
+    hv_vm_pointer_at(NAN, 0);
+    hv_xhci_poll(usb);
+    check("position retained until the guest offers a transfer", usb->ptr_pending);
+    hv_phys_write(usb->m, ring, transfer, sizeof transfer);
+    hv_xhci_poll(usb);
+    uint8_t report[5] = {0};
+    hv_phys_read(usb->m, buf, report, sizeof report);
+    check("bottom-left corner arrives without intermediate motion", !memcmp(report, (uint8_t[]){0,0,0,255,127}, 5));
+    check("one report consumes the pending position", !usb->ptr_pending && usb->slots[slot].ep[ep].dequeue == ring + 16);
+    hv_phys_write(usb->m, ring + 16, transfer, sizeof transfer);
+    hv_xhci_poll(usb);
+    check("stationary pointer does not replay motion", usb->slots[slot].ep[ep].dequeue == ring + 16);
+    hv_vm_pointer_at(1, 0);
+    hv_xhci_poll(usb);
+    hv_phys_read(usb->m, buf, report, sizeof report);
+    check("first move back reaches opposite corner", !memcmp(report, (uint8_t[]){0,255,127,0,0}, 5));
+}
+
 int main(void) {
     alarm(20);
     char dir[] = "/tmp/henge-mouse-XXXXXX", rom[256], disk[256], aux[256], ram[256], error[256];
@@ -120,6 +156,7 @@ int main(void) {
     check("create input devices without booting macOS", rc == 0);
     if (rc) fprintf(stderr, "%s\n", error);
     else {
+        verify_absolute_pointer(hv_vm_board());
         hv_vm_mouse_move(13, -7);
         hv_vm_mouse_wheel(3);
         hv_vm_mouse_hwheel(-2);

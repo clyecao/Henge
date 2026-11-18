@@ -135,27 +135,36 @@ enum PointerLock {
     private static var wanted = false
     private static var patched: Set<ObjectIdentifier> = []
 
-    static func set(_ on: Bool) {
-        wanted = on
-        let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
-        for window in windows {
-            guard let root = window.rootViewController else { continue }
-            let kind: AnyClass = type(of: root)
-            if patched.insert(ObjectIdentifier(kind)).inserted {
-                let answer: @convention(block) (UIViewController) -> Bool = { _ in wanted }
-                class_replaceMethod(kind, #selector(getter: UIViewController.prefersPointerLocked), imp_implementationWithBlock(answer), "B@:")
-            }
-            root.setNeedsUpdateOfPrefersPointerLocked()
-        }
+    private(set) static weak var window: UIWindow?
+    private static var localDisplay = false
+
+    static func bind(_ window: UIWindow, localDisplay: Bool) {
+        self.localDisplay = localDisplay
+        guard self.window !== window else { return }
+        let previous = self.window
+        self.window = window
+        previous?.rootViewController?.setNeedsUpdateOfPrefersPointerLocked()
+        set(wanted)
     }
 
-    /// iPadOS only locks the pointer to an app that fills the screen: in a window (Stage Manager, or iPadOS 26's windows)
-    /// the request is ignored and the system pointer stays separate from the Mac's (#18). An iPhone never locks it, and
-    /// its apps are always full screen, so the hint is for iPad only.
-    static var refused: Bool {
-        guard Device.isPad, wanted, GCMouse.current != nil else { return false }
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.filter { $0.activationState == .foregroundActive }
-        return !scenes.isEmpty && !scenes.contains { $0.pointerLockState?.isLocked == true }
+    static func set(_ on: Bool) {
+        wanted = on
+        guard let root = window?.rootViewController else { return }
+        let kind: AnyClass = type(of: root)
+        if patched.insert(ObjectIdentifier(kind)).inserted {
+            let answer: @convention(block) (UIViewController) -> Bool = { vc in
+                wanted && vc.viewIfLoaded?.window === window
+            }
+            class_replaceMethod(kind, #selector(getter: UIViewController.prefersPointerLocked), imp_implementationWithBlock(answer), "B@:")
+        }
+        root.setNeedsUpdateOfPrefersPointerLocked()
+    }
+
+    static var route: PhysicalPointerRoute {
+        let scene = window?.windowScene
+        return PhysicalPointerRoute(active: wanted && window?.isKeyWindow == true && scene?.activationState == .foregroundActive,
+                                    locked: scene?.pointerLockState?.isLocked == true,
+                                    localDisplay: Device.isPad && localDisplay)
     }
 }
 
@@ -181,15 +190,14 @@ final class HardwareMouse {
     private var scrolls: [ObjectIdentifier: ScrollDevice] = [:]
 
     func start() {
+        guard observers.isEmpty else { return }
         let defaults = UserDefaults.standard
         speed = defaults.object(forKey: Self.speedKey) == nil ? 1 : Float(defaults.double(forKey: Self.speedKey))
         reverse = defaults.bool(forKey: Self.reverseKey)
-        releaseButtons()
         let swapButtons = defaults.bool(forKey: PhysicalMouseButtons.swapKey)
         buttons = PhysicalMouseButtons(swapsRightAndMiddle: swapButtons)
         buttonsLogged = 0
         HengeLog.log("input", "physical mouse: swap right/middle \(swapButtons ? "on" : "off")")
-        scrolls = scrolls.mapValues { ScrollDevice(name: $0.name) }
         GCMouse.mice().forEach(attach)
         observers.append(NotificationCenter.default.addObserver(forName: .GCMouseDidConnect, object: nil, queue: .main) { [weak self] note in
             if let mouse = note.object as? GCMouse { self?.attach(mouse) }
@@ -200,18 +208,20 @@ final class HardwareMouse {
             self.scrolls.removeValue(forKey: ObjectIdentifier(mouse))
             self.mice.removeAll { $0 === mouse }
         })
-        observers.append(NotificationCenter.default.addObserver(forName: UIPointerLockState.didChangeNotification, object: nil, queue: .main) { note in
+        observers.append(NotificationCenter.default.addObserver(forName: UIPointerLockState.didChangeNotification, object: nil, queue: .main) { [weak self] note in
             // The scene comes in the user info: the notification's object isn't it.
             let scene = note.userInfo?[UIPointerLockState.sceneUserInfoKey] as? UIScene
-            let locked = scene?.pointerLockState?.isLocked ?? false
+            guard let scene, scene === PointerLock.window?.windowScene else { return }
+            self?.restX = 0
+            self?.restY = 0
+            let locked = scene.pointerLockState?.isLocked ?? false
             HengeLog.log("input", "pointer lock: \(locked ? "on" : "off")")
         })
-        PointerLock.set(true)
     }
 
     func stop() {
         PointerLock.set(false)
-        releaseButtons()
+        resetInput()
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
         for mouse in mice {
@@ -226,8 +236,15 @@ final class HardwareMouse {
         scrolls.removeAll()
     }
 
-    func releaseButtons() {
+    private func releaseButtons() {
         for button in buttons.releaseAll() { henge_vm_mouse_button(button, 0) }
+    }
+
+    func resetInput() {
+        releaseButtons()
+        restX = 0
+        restY = 0
+        scrolls = scrolls.mapValues { ScrollDevice(name: $0.name) }
     }
 
     private func attach(_ mouse: GCMouse) {
@@ -249,6 +266,7 @@ final class HardwareMouse {
 
     /// GameController's Y runs upward. What doesn't make a whole step yet waits for the next move.
     private func moved(_ dx: Float, _ dy: Float) {
+        guard PointerLock.route == .relative else { return }
         restX += dx * speed
         restY -= dy * speed
         let x = restX.rounded(), y = restY.rounded()
@@ -259,7 +277,7 @@ final class HardwareMouse {
     }
 
     private func button(_ physicalButton: Int32, _ pressed: Bool) {
-        guard let guestButton = buttons.event(physicalButton, pressed: pressed) else { return }
+        guard PointerLock.route != .inactive, let guestButton = buttons.event(physicalButton, pressed: pressed) else { return }
         if buttonsLogged < 32 {
             buttonsLogged += 1
             HengeLog.log("input", "physical mouse button: raw=\(physicalButton) guest=\(guestButton) \(pressed ? "down" : "up")")
@@ -271,7 +289,7 @@ final class HardwareMouse {
     /// GameController puts vertical motion on the first axis and horizontal on the second.
     /// Accumulate fractional wheel units so slow finger movements remain controllable.
     private func scrolled(_ first: Float, _ second: Float, from mouseID: ObjectIdentifier) {
-        guard var device = scrolls[mouseID] else { return }
+        guard PointerLock.route != .inactive, var device = scrolls[mouseID] else { return }
         let defaults = UserDefaults.standard
         let configured = defaults.object(forKey: ScrollSensitivity.key) == nil
             ? ScrollSensitivity.defaultValue : defaults.double(forKey: ScrollSensitivity.key)

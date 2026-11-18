@@ -1,5 +1,4 @@
 import SwiftUI
-import GameController
 
 /// A running Mac. Upright, its screen sits above a trackpad; on its side the screen fills the device
 /// and is its own trackpad. Zoomed in, the screen fills the device either way and follows the pointer.
@@ -34,7 +33,6 @@ struct SessionView: View {
     @State private var showDetails = false
     @State private var controlsHidden = false
     @State private var showRevealHint = false
-    @State private var pointerRefused = false
     @AppStorage("henge.controls.hintsShown") private var revealHintsShown = 0
     @AppStorage(VolumeClicks.inputModeKey) private var inputMode = VolumeClicks.InputMode.touchscreen
     @AppStorage(VolumeClicks.modeKey) private var volumeMode = VolumeClicks.Mode.delayHold
@@ -86,7 +84,8 @@ struct SessionView: View {
                     }
                     .position(x: layout.screen.midX, y: layout.screen.midY)
                 if state != 2 {
-                    Trackpad()
+                    Trackpad(screen: layout.screen.offsetBy(dx: -layout.touch.minX, dy: -layout.touch.minY),
+                             external: display.isExternal)
                         .frame(width: layout.touch.width, height: layout.touch.height)
                         .position(x: layout.touch.midX, y: layout.touch.midY)
                     if inputMode == .volumeButtons && volumeMode == .intercept {
@@ -101,16 +100,6 @@ struct SessionView: View {
                     } else {
                         floatingControls(layout)
                     }
-                    if pointerRefused && !showRevealHint {
-                        Label("Make Henge full screen to use the trackpad or mouse as the Mac's", systemImage: "cursorarrow.rays")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 18).padding(.vertical, 12)
-                            .deskGlass(in: Capsule())
-                            .position(x: full.width / 2, y: insets.top + 40)
-                            .transition(.opacity)
-                            .allowsHitTesting(false)
-                    }
                     if showRevealHint {
                         Label("Tap with four fingers to show the controls", systemImage: "hand.tap")
                             .font(.system(size: 15, weight: .medium))
@@ -121,7 +110,7 @@ struct SessionView: View {
                             .transition(.opacity)
                             .allowsHitTesting(false)
                     }
-                    if showWallpaperTip && !showRevealHint && !pointerRefused {
+                    if showWallpaperTip && !showRevealHint {
                         Label("For more speed, give this Mac a still wallpaper and set its screen saver to Never in System Settings.", systemImage: "speedometer")
                             .font(.system(size: 15, weight: .medium))
                             .foregroundStyle(.white)
@@ -150,12 +139,6 @@ struct SessionView: View {
             .animation(.easeInOut(duration: 0.25), value: controlsHidden)
             .animation(.easeInOut(duration: 0.25), value: showRevealHint)
             .animation(.easeInOut(duration: 0.25), value: showWallpaperTip)
-            .onReceive(NotificationCenter.default.publisher(for: UIPointerLockState.didChangeNotification)) { _ in
-                pointerRefused = PointerLock.refused
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .GCMouseDidConnect)) { _ in
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { pointerRefused = PointerLock.refused }
-            }
             .onReceive(NotificationCenter.default.publisher(for: Trackpad.revealTap)) { _ in
                 controlsHidden = false
                 showRevealHint = false
@@ -175,8 +158,12 @@ struct SessionView: View {
             zoomFollowing?.cancel()
             zoomFollowing = on ? Task { await followPointer() } : nil
         }
-        .onChange(of: pointerNeeded) { PointerLock.set(!$0) }
+        .onChange(of: pointerNeeded) { needed in
+            PointerLock.set(!needed && scenePhase == .active)
+            if needed { HardwareMouse.shared.resetInput() }
+        }
         .onChange(of: scenePhase) { phase in
+            PointerLock.set(phase == .active && !pointerNeeded)
             microphone.setForeground(phase == .active)
             guard phase != .active else {
                 display.refresh()
@@ -184,7 +171,7 @@ struct SessionView: View {
                 return
             }
             HardwareKeys.releaseAll()
-            HardwareMouse.shared.releaseButtons()
+            HardwareMouse.shared.resetInput()
             VolumeClicks.shared.releaseButtons()
             if phase == .inactive { InstantResume.pause() }
             if phase == .background && bootRAM > 0 { InstantResume.suspend(mac, ramMB: bootRAM, cpus: cpus) }
@@ -198,7 +185,6 @@ struct SessionView: View {
         .onAppear {
             microphone.setForeground(scenePhase == .active)
             UIApplication.shared.isIdleTimerDisabled = true
-            HardwareMouse.shared.start()
             VolumeClicks.shared.start()
         }
         .onDisappear {
@@ -610,6 +596,7 @@ struct SessionView: View {
         }
         UIApplication.shared.isIdleTimerDisabled = true
         HardwareMouse.shared.start()
+        PointerLock.set(scenePhase == .active && !pointerNeeded)
         HengeLog.log("session", "available memory \(henge_available_memory() >> 20) MB")
         var buffer = [CChar](repeating: 0, count: 256)
         JITBootstrap.releaseLingeringDebugger()

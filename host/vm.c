@@ -12,6 +12,7 @@
 #include <sys/ucontext.h>
 #include <stdio.h>
 #include <errno.h>
+#include <math.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -785,6 +786,12 @@ void hv_vm_touch(int id, int phase, int x, int y, uint32_t ts_ms) {
 void hv_vm_touch_frame(uint32_t ts_ms) { hv_xhci_touch_frame(board.usb, ts_ms); }
 
 void hv_vm_touch_button(int down) { hv_xhci_touch_button(board.usb, down); }
+
+void hv_vm_pointer_at(double x, double y) {
+    if (!isfinite(x) || !isfinite(y)) return;
+    hv_xhci_pointer(board.usb, (int)(fmin(1, fmax(0, x)) * HV_PTR_MAX + 0.5),
+                               (int)(fmin(1, fmax(0, y)) * HV_PTR_MAX + 0.5));
+}
 
 int hv_vm_pointer(int *x, int *y) {
     HvPvgLite *pvg = atomic_load_explicit(&display_pvg, memory_order_acquire);
