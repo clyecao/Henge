@@ -1,4 +1,4 @@
-import Foundation
+import CoreGraphics
 
 enum PhysicalPointerRoute {
     case inactive, relative, absolute
