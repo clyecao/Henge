@@ -28,6 +28,8 @@ final class ScrollFingers {
     private static let minY = 5206.0 * 0.15, maxY = 5206.0 * 0.70
     private static let spread = 1100.0
     private static let mergeDelay = 0.003, idleLift = 0.12, rest = 0.05
+    // Allow a zero between adjacent ~8 ms trackpad reports without lifting.
+    private static let releaseDelay = 0.016
     // A malformed/very large delta must not leave the pad permanently at an
     // edge. Also bound held motion so long swipes cannot build an unbounded debt.
     private static let maxStep = 900.0, maxBacklog = 1800.0
@@ -38,6 +40,8 @@ final class ScrollFingers {
     private var x = 0.0, y = 0.0
     private var lastFirst: Float = 0, lastSecond: Float = 0
     private var lastSample: TimeInterval?
+    private var sampleStart: TimeInterval?
+    private var zeroTime: TimeInterval?
     private var pendingX = 0.0, pendingY = 0.0
     private var pendingTime: TimeInterval?
     private var backlogX = 0.0, backlogY = 0.0
@@ -59,18 +63,41 @@ final class ScrollFingers {
 
     deinit { flushWork?.cancel(); idleWork?.cancel() }
 
-    func scroll(first: Float, second: Float, sensitivity: Double, reversed: Bool) {
-        let time = now()
+    func scroll(first: Float, second: Float, sensitivity: Double, reversed: Bool,
+                sampleTimestamp: TimeInterval? = nil) {
+        let arrival = now()
+        let time = sampleTimestamp.flatMap { $0.isFinite && $0 > 0 && abs($0 - arrival) < 1 ? $0 : nil } ?? arrival
         guard first.isFinite, second.isFinite, time.isFinite, time >= 0, time < 1e12 else { return }
         guard lastSample.map({ time >= $0 }) ?? true else { return }
+        if let zero = zeroTime, time - zero >= Self.releaseDelay {
+            end() // a new report arrived before the main queue ran the lift timer
+        }
         lastSample = time
-        let verticalChanged = first != lastFirst, horizontalChanged = second != lastSecond
+        let identical = first == lastFirst && second == lastSecond
+        let newSample = sampleStart.map { time - $0 >= Self.mergeDelay } ?? true
+        // A busy main queue can deliver several hardware samples before the
+        // merge timer runs. Commit the preceding one at its own timestamp.
+        if newSample {
+            if flushWork != nil {
+                flushWork?.cancel()
+                flushWork = nil
+                flush()
+            }
+            sampleStart = time
+        }
+        let repeatMotion = identical && newSample
+        let verticalChanged = first != lastFirst || repeatMotion
+        let horizontalChanged = second != lastSecond || repeatMotion
         lastFirst = first
         lastSecond = second
         if first == 0 && second == 0 {
-            end()
+            if zeroTime == nil && (down || pendingTime != nil || needsPlacement) {
+                zeroTime = time
+                armLift(after: Self.releaseDelay)
+            }
             return
         }
+        zeroTime = nil
         guard verticalChanged || horizontalChanged else { return }
         // The fingers move opposite to GameController's content direction.
         // Keep PR #167's calibration: 40 sensor units/point at sensitivity 0.3.
@@ -91,6 +118,10 @@ final class ScrollFingers {
             flushWork = work
             schedule(Self.mergeDelay, work)
         }
+        armLift(after: Self.idleLift)
+    }
+
+    private func armLift(after delay: TimeInterval) {
         idleWork?.cancel()
         let token = generation
         let work = DispatchWorkItem { [weak self] in
@@ -98,15 +129,15 @@ final class ScrollFingers {
             self.end()
         }
         idleWork = work
-        schedule(Self.idleLift, work)
+        schedule(delay, work)
     }
 
     /// A normal lift may hand momentum to macOS; edge backlog is never replayed.
     func end() {
         cancelWork()
         if restingUntil == nil && !needsPlacement { flush() }
+        lift(at: zeroTime ?? now())
         clearMotion()
-        lift(at: now())
     }
 
     /// Session/device/input-owner teardown discards even the unflushed sample.
@@ -130,6 +161,7 @@ final class ScrollFingers {
         restingUntil = nil
         needsPlacement = false
         lastFirst = 0; lastSecond = 0; lastSample = nil
+        sampleStart = nil; zeroTime = nil
     }
 
     private static func bounded(_ dx: Double, _ dy: Double, limit: Double) -> (Double, Double) {
@@ -148,7 +180,7 @@ final class ScrollFingers {
         guard dx != 0 || dy != 0 || restingUntil != nil else { return }
         if needsPlacement {
             hold(dx, dy)
-            place(towardX: backlogX, towardY: backlogY, at: time)
+            regrip(at: time)
             needsPlacement = false
             return // move on the next sample, not at the instant of contact
         }
@@ -170,7 +202,11 @@ final class ScrollFingers {
         guard dx != 0 || dy != 0 else { return }
         if !down {
             // Leave a sample interval between initial contact and movement.
-            place(towardX: dx, towardY: dy, at: max(0.001, time - 0.008))
+            // A light swipe can start with a tiny delta in the wrong direction.
+            // Leave room to move either way until the direction has settled.
+            x = 8134 / 2
+            y = (Self.minY + Self.maxY) / 2
+            place(at: max(0.001, time - 0.008))
         }
         let nx = x + dx, ny = y + dy
         if nx - Self.spread / 2 < Self.minX || nx + Self.spread / 2 > Self.maxX || ny < Self.minY || ny > Self.maxY {
@@ -197,14 +233,18 @@ final class ScrollFingers {
         commitFrame(ts)
     }
 
-    private func place(towardX: Double, towardY: Double, at time: TimeInterval) {
-        if abs(towardY) >= abs(towardX) {
+    private func regrip(at time: TimeInterval) {
+        if abs(backlogY) >= abs(backlogX) {
             x = 8134 / 2
-            y = towardY > 0 ? Self.minY : Self.maxY
+            y = backlogY > 0 ? Self.minY : Self.maxY
         } else {
-            x = towardX > 0 ? Self.minX + Self.spread / 2 : Self.maxX - Self.spread / 2
+            x = backlogX > 0 ? Self.minX + Self.spread / 2 : Self.maxX - Self.spread / 2
             y = 5206 / 2
         }
+        place(at: time)
+    }
+
+    private func place(at time: TimeInterval) {
         let ts = Self.ms(time)
         touch(ids.0, 0, Int32(x - Self.spread / 2), Int32(y), ts)
         touch(ids.1, 0, Int32(x + Self.spread / 2), Int32(y), ts)

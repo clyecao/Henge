@@ -43,9 +43,11 @@ commit `e158322564d5ad83708a2d44d7e431613544592b` by Jens Köhler. Scroll deltas
 two contacts on the existing Magic Trackpad 2, so macOS handles pixel scrolling
 and momentum. They bypass the wheel conversion and rate limit above.
 
-- Merge the two axis callbacks over 3 ms, ignoring the stale axis, and retain the
-  captured callback timestamp when committing the frame.
-- Lift on `(0, 0)` or 120 ms of inactivity. Cancel pending work on device/session
+- Merge callbacks within a 3 ms sample window. Ignore duplicate callbacks within
+  that window and accept equal displacements in successive samples. Use the input
+  profile's event time when available so queued samples can retain separate frames.
+- Start the first pair near the center so a light change of direction has room.
+- Lift after a zero persists for 16 ms or after 120 ms of inactivity. Cancel pending work on device/session
   teardown, input-source changes or touchscreen contact; touchscreen and hardware
   fingers must not combine into a three/four-finger gesture.
 - Alternate finger pairs 14/15 and 12/13, outside the touchscreen's 1–5.

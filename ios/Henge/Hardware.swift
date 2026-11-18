@@ -264,8 +264,8 @@ final class HardwareMouse {
         input.leftButton.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(0, pressed) }
         input.rightButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(1, pressed) }
         input.middleButton?.pressedChangedHandler = { [weak self] _, _, pressed in self?.button(2, pressed) }
-        input.scroll.valueChangedHandler = { [weak self] _, first, second in
-            self?.scrolled(first, second, from: mouseID)
+        input.scroll.valueChangedHandler = { [weak self, weak input] _, first, second in
+            self?.scrolled(first, second, from: mouseID, sampleTimestamp: input?.lastEventTimestamp)
         }
     }
 
@@ -292,7 +292,8 @@ final class HardwareMouse {
 
     /// GameController puts vertical motion on the first axis and horizontal on the second.
     /// Accumulate fractional wheel units so slow finger movements remain controllable.
-    private func scrolled(_ first: Float, _ second: Float, from mouseID: ObjectIdentifier) {
+    private func scrolled(_ first: Float, _ second: Float, from mouseID: ObjectIdentifier,
+                          sampleTimestamp: TimeInterval?) {
         guard scrolls[mouseID] != nil else { return } // a queued callback after disconnect/stop
         let defaults = UserDefaults.standard
         if trackpads.contains(mouseID) {
@@ -303,7 +304,8 @@ final class HardwareMouse {
             }
             let configured = defaults.object(forKey: TrackpadScrollSettings.key) == nil
                 ? TrackpadScrollSettings.defaultValue : defaults.double(forKey: TrackpadScrollSettings.key)
-            scrollFingers.scroll(first: first, second: second, sensitivity: configured, reversed: reverse)
+            scrollFingers.scroll(first: first, second: second, sensitivity: configured, reversed: reverse,
+                                 sampleTimestamp: sampleTimestamp)
             if scrollsLogged < 24 {
                 scrollsLogged += 1
                 HengeLog.log("input", "trackpad scroll raw: \(first), \(second); speed: \(configured)")

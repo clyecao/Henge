@@ -79,6 +79,7 @@ struct ScrollFingersTests {
         }
         check(TrackpadScrollSettings.key != ScrollSensitivity.key, "trackpad speed must not overwrite mouse speed")
         testMergeAndEnd()
+        testLightSteadySwipe()
         testCancellation()
         testSensitivity()
         testLongSwipes()
@@ -90,16 +91,15 @@ struct ScrollFingersTests {
         pad.send(1)
         pad.advance(0.001)
         pad.send(1, 0.5) // same sample's second callback: stale vertical axis
+        pad.send(1, 0.5) // duplicate within the same sample
         check(pad.events.isEmpty, "callbacks must merge before reporting")
         pad.advance(0.003)
         check(pad.frames.count == 1, "one merged frame per sample")
         let motion = pad.movement(pad.frames[0])
         check(motion.0 == -20 && motion.1 == -40, "stale axis must not double movement")
-        pad.send(1, 0.5)
-        pad.advance(0.004)
-        check(pad.frames.count == 1, "duplicate callback must not move again")
         pad.send(0, 0)
-        check(pad.contacts.isEmpty, "zero sample must lift both fingers")
+        pad.advance(0.017)
+        check(pad.contacts.isEmpty, "confirmed zero sample must lift both fingers")
         let count = pad.events.count
         pad.advance(0.3)
         check(pad.events.count == count, "ended gesture must not fire delayed work")
@@ -108,6 +108,7 @@ struct ScrollFingersTests {
         quick.send(1)
         quick.advance(0.001)
         quick.send(0)
+        quick.advance(0.017)
         check(quick.frames.count == 1 && quick.contacts.isEmpty, "quick release must flush one pending move then lift")
         quick.advance(0.3)
         check(quick.frames.count == 1, "quick release must cancel scheduled flush")
@@ -128,6 +129,39 @@ struct ScrollFingersTests {
         delayed.time += 0.05 // simulate a busy main queue before the scheduled flush
         delayed.advance(0)
         check(delayed.frames[0].ts == 100000, "a delayed flush must retain the captured sample time")
+        delayed.fingers.cancel()
+    }
+
+    static func testLightSteadySwipe() {
+        for horizontal in [true, false] {
+            let pad = Pad()
+            for _ in 0..<24 {
+                let value: Float = 0.0625
+                pad.send(horizontal ? 0 : value, horizontal ? value : 0, speed: 0.05)
+                pad.advance(0.008)
+            }
+            check(pad.frames.count == 24, "equal deltas across independent reports must keep moving")
+            check(pad.events.filter { $0.phase == 0 }.count == 2, "steady input must keep a single pair down")
+            let (dx, dy) = pad.movement(pad.frames.last!)
+            check(abs(Double(horizontal ? dx : dy) + 10) <= 1, "sub-unit motion must add up at minimum speed")
+            pad.send(0)
+            pad.advance(0.008)
+            pad.send(horizontal ? 0 : -1, horizontal ? -1 : 0)
+            pad.advance(0.008)
+            check(pad.events.allSatisfy { $0.phase != 2 }, "one zero between moving samples must not split a swipe")
+            let previous = pad.frames[23].contacts[14]!, current = pad.frames.last!.contacts[14]!
+            check(horizontal ? current.x > previous.x : current.y > previous.y, "small reversal must move immediately")
+            pad.fingers.cancel()
+        }
+
+        let delayed = Pad()
+        for i in 0..<4 {
+            let timestamp = delayed.time - 0.032 + Double(i) * 0.008
+            delayed.fingers.scroll(first: 0.5, second: 0, sensitivity: 0.3, reversed: false, sampleTimestamp: timestamp)
+        }
+        delayed.advance(0.004)
+        check(delayed.frames.count == 4 && delayed.movement(delayed.frames.last!).1 == -80,
+              "queued reports with distinct hardware timestamps must retain distance and individual frames")
         delayed.fingers.cancel()
     }
 
@@ -200,6 +234,7 @@ struct ScrollFingersTests {
             let reversed = pad.frames.dropFirst(count)
             check(reversed.contains { pad.movement($0).1 > 0 }, "direction change must recover after edge rest")
             pad.send(0)
+            pad.advance(0.017)
             check(pad.contacts.isEmpty, "long-swipe release must lift contacts")
             let eventCount = pad.events.count
             pad.advance(1)
