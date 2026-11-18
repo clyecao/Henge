@@ -61,6 +61,13 @@ $(B)/henge-agent.gz: $(B)/henge-agent
 $(B)/share.o: host/share.c host/share.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(B)/test_share.dylib: host/share.c host/share.h | $(B)
+	$(CC) $(CFLAGS) -dynamiclib $< -o $@
+
+test-share: $(B)/test_share.dylib
+	python3 tests/test_share.py $<
+.PHONY: test-share
+
 $(B)/hengevm: host/main.c $(ENGINE) $(DEV) $(B)/pvg_mac.o $(B)/net_slirp.o $(B)/dns_proxy.o $(B)/share.o $(B)/audio_mac.o $(B)/vm.o $(B)/snapshot.o $(B)/dt_fixup.o $(B)/usb_host.o $(B)/mac-restore/libhengerestore.a
 	$(CC) $(CFLAGS) host/main.c $(ENGINE) $(DEV) $(B)/pvg_mac.o $(B)/net_slirp.o $(B)/dns_proxy.o $(B)/share.o $(B)/audio_mac.o $(B)/vm.o $(B)/snapshot.o $(B)/dt_fixup.o $(B)/usb_host.o $(B)/mac-restore/libhengerestore.a -lz -lcompression -framework Foundation -framework CFNetwork -framework Security -framework SystemConfiguration -framework IOKit $(SLIRP_LIBS) -framework AudioToolbox -framework ParavirtualizedGraphics -framework Metal -framework IOSurface \
 	    -framework Foundation -framework CoreGraphics -framework ImageIO -framework UniformTypeIdentifiers -framework CoreFoundation \
@@ -163,8 +170,8 @@ $(B)/test_%: tests/test_%.c tests/%_programs.S tests/harness.S tests/harness.h $
 
 test: all test-engine
 
-# Engine checks without the desktop restore tool and its external libraries.
-test-engine: $(TESTS)
+# Engine and built-in service checks without the desktop restore tool or its external libraries.
+test-engine: $(TESTS) test-share
 	@ulimit -s 65520; for t in $(TESTS); do echo "== $$t"; $$t || exit 1; done # a test keeps a whole HvCpu (2 MB of TLB and more) on its stack
 
 test-code-cache: $(B)/test_jit_region $(B)/test_jit $(B)/test_jit_cache

@@ -86,9 +86,7 @@ typedef struct Request {
     char query[128];
     char destination[PATH_MAX]; /* decoded path */
     char if_header[256];
-    char if_match[160];
-    char if_none_match[160];
-    char if_modified_since[80];
+    const char *if_match, *if_none_match, *if_modified_since; /* in this connection's request headers */
     long long length;
     int chunked, expect_continue, close, overwrite, depth;
     long long range_from, range_to; /* -1: none */
@@ -328,30 +326,47 @@ static void dav_key(const char *ns, const char *name, char *out, size_t cap) {
     snprintf(out, cap, DAV_XATTR_PREFIX "%lx", h);
 }
 
-static void add_dead_props(Text *t, const char *local) {
-    char keys[4096];
-    ssize_t n = listxattr(local, keys, sizeof keys, XATTR_NOFOLLOW);
+static void add_dead_prop(Text *t, const char *local, const char *key) {
+    ssize_t n = getxattr(local, key, NULL, 0, 0, XATTR_NOFOLLOW);
     if (n <= 0) return;
-    for (const char *k = keys; k < keys + n; k += strlen(k) + 1) {
-        if (strncmp(k, DAV_XATTR_PREFIX, strlen(DAV_XATTR_PREFIX))) continue;
-        char val[8192];
-        ssize_t v = getxattr(local, k, val, sizeof val - 1, 0, XATTR_NOFOLLOW);
-        if (v < 0) continue;
-        val[v] = 0;
-        char *nl = strchr(val, '\n');
-        if (!nl) continue;
-        *nl = 0;
-        /* The element name is the xattr key's hash; the stored namespace + inner XML are
-           re-emitted under a prefix bound to that namespace. The name itself is recovered
-           from the tail of the value: value = ns "\n" name "\n" inner. */
-        char *nl2 = strchr(nl + 1, '\n');
-        if (!nl2) continue;
-        *nl2 = 0;
-        const char *hash = k + strlen(DAV_XATTR_PREFIX);
-        addf(t, "<dp%s:%s xmlns:dp%s=\"", hash, nl + 1, hash);
-        add_xml(t, val);
-        addf(t, "\">%s</dp%s:%s>", nl2 + 1, hash, nl + 1);
+    char *value = malloc((size_t)n + 1);
+    if (!value) return;
+    n = getxattr(local, key, value, (size_t)n, 0, XATTR_NOFOLLOW);
+    if (n >= 0) {
+        value[n] = 0;
+        char *inner = value;
+        char *ns = strsep(&inner, "\n");
+        char *name = strsep(&inner, "\n");
+        if (name && inner) {
+            const char *hash = key + strlen(DAV_XATTR_PREFIX);
+            addf(t, "<dp%s:%s xmlns:dp%s=\"", hash, name, hash);
+            add_xml(t, ns);
+            adds(t, "\">");
+            adds(t, inner);
+            addf(t, "</dp%s:%s>", hash, name);
+        }
     }
+    free(value);
+}
+
+static void add_dead_props(Text *t, const char *local) {
+    ssize_t n = listxattr(local, NULL, 0, XATTR_NOFOLLOW);
+    if (n <= 0) return;
+    char *keys = malloc((size_t)n);
+    if (!keys) return;
+    n = listxattr(local, keys, (size_t)n, XATTR_NOFOLLOW);
+    for (ssize_t i = 0; i < n; i += strlen(keys + i) + 1) {
+        if (!strncmp(keys + i, DAV_XATTR_PREFIX, strlen(DAV_XATTR_PREFIX)))
+            add_dead_prop(t, local, keys + i);
+    }
+    free(keys);
+}
+
+/* Finder can revalidate twice within one second. Include the inode for atomic replacements. */
+static void etag_of(const struct stat *st, char *out, size_t cap) {
+    snprintf(out, cap, "\"%llx-%llx-%llx-%lx\"", (unsigned long long)st->st_ino,
+             (unsigned long long)st->st_size, (unsigned long long)st->st_mtimespec.tv_sec,
+             (unsigned long)st->st_mtimespec.tv_nsec);
 }
 
 static void add_entry(Text *t, const char *url_path, const char *name, const struct stat *st, int is_root, const char *local) {
@@ -371,9 +386,10 @@ static void add_entry(Text *t, const char *url_path, const char *name, const str
     if (dir) {
         adds(t, "<D:resourcetype><D:collection/></D:resourcetype>");
     } else {
+        char etag[64];
+        etag_of(st, etag, sizeof etag);
         addf(t, "<D:resourcetype/><D:getcontentlength>%lld</D:getcontentlength><D:getcontenttype>application/octet-stream</D:getcontenttype>"
-                "<D:getetag>\"%llx-%llx\"</D:getetag>",
-             (long long)st->st_size, (unsigned long long)st->st_size, (unsigned long long)st->st_mtimespec.tv_sec);
+                "<D:getetag>%s</D:getetag>", (long long)st->st_size, etag);
     }
     adds(t, "<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>"
             "<D:lockdiscovery/>");
@@ -388,10 +404,29 @@ static void add_entry(Text *t, const char *url_path, const char *name, const str
     adds(t, "</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>");
 }
 
-/* The ETag share.c has always sent: size and whole-second mtime. One place makes it, so the
-   conditional-request checks below compare against exactly what clients were given. */
-static void etag_of(const struct stat *st, char *out, size_t cap) {
-    snprintf(out, cap, "\"%llx-%llx\"", (unsigned long long)st->st_size, (unsigned long long)st->st_mtimespec.tv_sec);
+/* If-None-Match accepts weak validators. If-Match on a write requires a strong one. */
+static int etag_matches(const char *field, const char *etag, int allow_weak) {
+    const char *p = field + strspn(field, " \t");
+    if (*p == '*') {
+        p++;
+        return p[strspn(p, " \t")] == 0;
+    }
+    size_t len = strlen(etag);
+    while (*p) {
+        int weak = !strncmp(p, "W/", 2);
+        if (weak) p += 2;
+        if (*p != '"') return 0;
+        const char *end = strchr(p + 1, '"');
+        if (!end) return 0;
+        int match = (!weak || allow_weak) && (size_t)(end + 1 - p) == len && !memcmp(p, etag, len);
+        p = end + 1;
+        p += strspn(p, " \t");
+        if (*p && *p != ',') return 0;
+        if (match || !*p) return match;
+        p++;
+        p += strspn(p, " \t");
+    }
+    return 0;
 }
 
 /* An HTTP date ("Wed, 21 Oct 2015 07:28:00 GMT") to an epoch, or -1 if it isn't one. */
@@ -403,12 +438,10 @@ static time_t http_date(const char *s) {
 }
 
 /* 304 with the validators, so a revalidating client can keep its copy without a body. */
-static int respond_not_modified(Conn *c, Request *r, const struct stat *st) {
-    char etag[64];
-    etag_of(st, etag, sizeof etag);
+static int respond_not_modified(Conn *c, Request *r, const char *etag, size_t size) {
     char headers[256];
     snprintf(headers, sizeof headers, "ETag: %s\r\nCache-Control: no-cache\r\n", etag);
-    return respond(c, r, 304, "Not Modified", headers, NULL, 0);
+    return respond(c, r, 304, "Not Modified", headers, NULL, size);
 }
 
 static int do_propfind(Conn *c, Request *r) {
@@ -453,7 +486,7 @@ typedef struct DavProp {
 /* The next tag at or after p: returns a pointer into a static buffer holding the tag's
    interior (between < and >), and sets *after past the >. NULL when no tag remains. */
 static const char *next_tag(const char *p, const char **after) {
-    static char tag[1024];
+    static __thread char tag[1024];
     const char *lt = strchr(p, '<');
     if (!lt) return NULL;
     if (lt[1] == '!' || lt[1] == '?') { /* comments, declarations, PIs: skip to > */
@@ -483,7 +516,7 @@ static void tag_name(const char *tag, char *qname, size_t qcap, char *local, siz
     size_t n = 0;
     while (*p && *p != ' ' && *p != '\t' && *p != '/' && n + 1 < qcap) qname[n++] = *p++;
     qname[n] = 0;
-    *selfclose = tag[strlen(tag) - 1] == '/';
+    *selfclose = *tag && tag[strlen(tag) - 1] == '/';
     const char *colon = strchr(qname, ':');
     snprintf(local, lcap, "%s", colon ? colon + 1 : qname);
 }
@@ -639,21 +672,18 @@ static int do_get(Conn *c, Request *r) {
     /* Conditional requests (RFC 9110): a client revalidating its cache gets a body only if the
        file actually changed. webdavfs polls with these; honouring them is what turns its
        freshness check from a full re-read into a 304. If-None-Match wins over If-Modified-Since. */
-    {
-        char etag[64];
-        etag_of(&st, etag, sizeof etag);
-        if (r->if_none_match[0]) {
-            if (!strcmp(r->if_none_match, "*") || strstr(r->if_none_match, etag)) {
-                close(fd);
-                return respond_not_modified(c, r, &st);
-            }
-        } else if (r->if_modified_since[0]) {
-            time_t since = http_date(r->if_modified_since);
-            if (since >= 0 && st.st_mtimespec.tv_sec <= since) {
-                close(fd);
-                return respond_not_modified(c, r, &st);
-            }
-        }
+    char etag[64];
+    etag_of(&st, etag, sizeof etag);
+    int current = 0;
+    if (r->if_none_match) {
+        current = etag_matches(r->if_none_match, etag, 1);
+    } else if (r->if_modified_since) {
+        time_t since = http_date(r->if_modified_since);
+        current = since >= 0 && st.st_mtimespec.tv_sec <= since;
+    }
+    if (current) {
+        close(fd);
+        return respond_not_modified(c, r, etag, (size_t)st.st_size);
     }
     long long from = 0, to = st.st_size - 1;
     int partial = 0;
@@ -680,9 +710,8 @@ static int do_get(Conn *c, Request *r) {
     char head[1024];
     int n = snprintf(head, sizeof head,
                      "HTTP/1.1 %s\r\nServer: Henge\r\nContent-Length: %lld\r\nContent-Type: application/octet-stream\r\nAccept-Ranges: bytes\r\n"
-                     "Last-Modified: %s\r\nETag: \"%llx-%llx\"\r\nCache-Control: no-cache\r\n",
-                     partial ? "206 Partial Content" : "200 OK", len, modified, (unsigned long long)st.st_size,
-                     (unsigned long long)st.st_mtimespec.tv_sec);
+                     "Last-Modified: %s\r\nETag: %s\r\nCache-Control: no-cache\r\n",
+                     partial ? "206 Partial Content" : "200 OK", len, modified, etag);
     if (partial) n += snprintf(head + n, sizeof head - (size_t)n, "Content-Range: bytes %lld-%lld/%lld\r\n", from, to, (long long)st.st_size);
     n += snprintf(head + n, sizeof head - (size_t)n, "%s\r\n", r->close ? "Connection: close\r\n" : "");
     int rc = send_all(c->fd, head, (size_t)n);
@@ -704,8 +733,16 @@ static int do_get(Conn *c, Request *r) {
     return rc;
 }
 
+static int put_matches(const char *field, const struct stat *st) {
+    if (!st || !S_ISREG(st->st_mode)) return 0;
+    char etag[64];
+    etag_of(st, etag, sizeof etag);
+    return etag_matches(field, etag, 0);
+}
+
 /* Into a temporary file beside it, then renamed, so a transfer cut short leaves the old file alone. */
 static int do_put(Conn *c, Request *r) {
+    static pthread_mutex_t commit_mu = PTHREAD_MUTEX_INITIALIZER;
     char local[PATH_MAX], temp[PATH_MAX];
     struct stat st;
     if (local_path(r->path, local, sizeof local) != 0) {
@@ -713,17 +750,9 @@ static int do_put(Conn *c, Request *r) {
         return respond_empty(c, r, 403, "Forbidden");
     }
     int existed = stat(local, &st) == 0;
-    if (r->if_match[0]) { /* the client named the version it expects to replace */
-        int ok = 0;
-        if (existed && !S_ISDIR(st.st_mode)) {
-            char etag[64];
-            etag_of(&st, etag, sizeof etag);
-            ok = !strcmp(r->if_match, "*") || strstr(r->if_match, etag) != NULL;
-        }
-        if (!ok) {
-            if (body_discard(c, r) != 0) return -1;
-            return respond_empty(c, r, 412, "Precondition Failed");
-        }
+    if (r->if_match && !put_matches(r->if_match, existed ? &st : NULL)) {
+        if (body_discard(c, r) != 0) return -1;
+        return respond_empty(c, r, 412, "Precondition Failed");
     }
     if (existed && S_ISDIR(st.st_mode)) {
         if (body_discard(c, r) != 0) return -1;
@@ -769,8 +798,19 @@ static int do_put(Conn *c, Request *r) {
     }
     free(buf);
     close(fd);
-    if (full || rename(temp, local) != 0) {
+    if (full) {
         unlink(temp);
+        return respond_empty(c, r, 507, "Insufficient Storage");
+    }
+    /* Two uploads can share an initial ETag. Check again at the rename, after both bodies can have arrived. */
+    pthread_mutex_lock(&commit_mu);
+    existed = stat(local, &st) == 0;
+    int stale = r->if_match && !put_matches(r->if_match, existed ? &st : NULL);
+    int saved = !stale && rename(temp, local) == 0;
+    pthread_mutex_unlock(&commit_mu);
+    if (!saved) {
+        unlink(temp);
+        if (stale) return respond_empty(c, r, 412, "Precondition Failed");
         return respond_empty(c, r, 507, "Insufficient Storage");
     }
     return existed ? respond_empty(c, r, 204, "No Content") : respond_empty(c, r, 201, "Created");
@@ -1054,9 +1094,9 @@ static int read_request(Conn *c, Request *r) {
         else if (header_is(line, "Depth", &v)) r->depth = v[0] == '0' ? 0 : 1;
         else if (header_is(line, "Overwrite", &v)) r->overwrite = v[0] != 'F' && v[0] != 'f';
         else if (header_is(line, "If", &v)) snprintf(r->if_header, sizeof r->if_header, "%s", v);
-        else if (header_is(line, "If-Match", &v)) snprintf(r->if_match, sizeof r->if_match, "%s", v);
-        else if (header_is(line, "If-None-Match", &v)) snprintf(r->if_none_match, sizeof r->if_none_match, "%s", v);
-        else if (header_is(line, "If-Modified-Since", &v)) snprintf(r->if_modified_since, sizeof r->if_modified_since, "%s", v);
+        else if (header_is(line, "If-Match", &v)) r->if_match = v;
+        else if (header_is(line, "If-None-Match", &v)) r->if_none_match = v;
+        else if (header_is(line, "If-Modified-Since", &v)) r->if_modified_since = v;
         else if (header_is(line, "Destination", &v)) {
             const char *p = v;
             if (!strncasecmp(p, "http://", 7) || !strncasecmp(p, "https://", 8)) {
