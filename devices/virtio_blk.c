@@ -97,6 +97,7 @@ static int handle(HvVirtioBlk *b, HvVirtqElem *e, uint32_t *written) {
         for (uint32_t at = 0; at < rlen && status == S_OK; at += 16) {
             struct { uint64_t sector; uint32_t num_sectors, flags; } r;
             if (hv_virtq_read(v, e, (uint32_t)sizeof hdr + at, &r, sizeof r) != sizeof r ||
+                r.sector > b->disk->size / 512 ||
                 hv_disk_zero(b->disk, r.sector * 512, (uint64_t)r.num_sectors * 512) != 0)
                 status = S_IOERR;
         }

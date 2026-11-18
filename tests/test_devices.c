@@ -393,6 +393,25 @@ static void test_virtio_blk(HvDisk *aux) {
     hv_disk_read(aux, 9 * 512, back, 512);
     check("discard status", ram(status)[0], 0);
     check("discarded sector reads as zeros", memcmp(back, zero, 512), 0);
+    /* WRITE_ZEROES uses the same range on the aux disk, including its last sector. */
+    h[0] = 13;
+    memcpy(ram(hdr), h, sizeof h);
+    range[0] = (uint32_t)(aux->size / 512 - 1);
+    memset(back, 0x5a, sizeof back);
+    check("seed last aux sector", hv_disk_write(aux, (uint64_t)range[0] * 512, back, 512), 0);
+    memcpy(ram(data), range, sizeof range);
+    offer(ring, 8);
+    wr16(bar + 0x3000, 0);
+    hv_virtio_blk_drain(board.aux_blk);
+    check("write zeroes status", ram(status)[0], 0);
+    check("read last aux sector", hv_disk_read(aux, (uint64_t)range[0] * 512, back, 512), 0);
+    check("last aux sector zeroed", memcmp(back, zero, 512), 0);
+    range[1] = 0x80000000; /* An out-of-capacity sector must be rejected before converting to bytes. */
+    memcpy(ram(data), range, sizeof range);
+    offer(ring, 8);
+    wr16(bar + 0x3000, 0);
+    hv_virtio_blk_drain(board.aux_blk);
+    check("out of range write zeroes", ram(status)[0], 1);
     rd8(bar + 0x1000);
 }
 
