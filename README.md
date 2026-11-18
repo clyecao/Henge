@@ -44,6 +44,8 @@ Sideload `Henge.ipa` from [Releases](https://github.com/Leviidev/Henge/releases)
 
 In Shortcuts on iPhone or iPad, add **Henge → Turn On JIT**. The action opens Henge and makes the same request as the button on the Macs page. Setup and any prompts continue in Henge after the action returns.
 
+Follow it with **Henge → Is JIT Enabled?** and pass its Boolean result to **If**. The check runs in the background and returns immediately by default. Set **Wait up to (seconds)** to 1–30 to give an activation request time to finish. The result is true as soon as JIT is usable in the current Henge process, or false if it is still unavailable when the wait ends.
+
 Then open the Install tab, pick macOS Sequoia 15.6.1, and keep Henge open with the device plugged in. Tahoe 26.6.2 and macOS 27.2 are offered too: both install and run on an iPhone 17 Pro, though Tahoe's first setup is slow and macOS 27 is the slowest (Safari's pages may stay blank on it). Sonoma 14.6.1 and Ventura 13.6 are smaller downloads (14.1 and 12.3 GB) for devices short on storage: they install, set up, and run Safari (both tested on an iPhone 17 Pro). Monterey isn't offered yet: it installs, but its desktop never appears.
 
 ## Sharing with the Mac

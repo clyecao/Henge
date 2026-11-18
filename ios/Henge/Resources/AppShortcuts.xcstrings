@@ -1,6 +1,22 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Check JIT status in ${applicationName}" : {
+      "localizations" : {
+        "en" : {
+          "stringSet" : {
+            "state" : "translated",
+            "values" : ["Check JIT status in ${applicationName}"]
+          }
+        },
+        "zh-Hans" : {
+          "stringSet" : {
+            "state" : "translated",
+            "values" : ["查询 ${applicationName} 的 JIT 状态"]
+          }
+        }
+      }
+    },
     "Turn on JIT in ${applicationName}" : {
       "localizations" : {
         "en" : {

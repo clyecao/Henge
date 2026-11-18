@@ -8,12 +8,25 @@ final class JITCoordinator {
     func enable() { requests += 1 }
 }
 
+@MainActor
+enum JITBootstrap {
+    static var confirmedReady = false
+}
+
 @main
 struct JITShortcutTests {
+    @MainActor static func query(wait seconds: Int) async throws -> Bool? {
+        let intent = IsJITEnabledIntent()
+        intent.waitSeconds = seconds
+        return try await intent.perform().value
+    }
+
     @MainActor static func main() async throws {
         precondition(TurnOnJITIntent.openAppWhenRun)
+        precondition(!IsJITEnabledIntent.openAppWhenRun)
         if #available(macOS 26.0, *) {
             precondition(TurnOnJITIntent.supportedModes == .foreground(.immediate))
+            precondition(IsJITEnabledIntent.supportedModes == .background)
         }
         _ = try await TurnOnJITIntent().perform()
         precondition(JITCoordinator.shared.requests == 1)
@@ -34,5 +47,28 @@ struct JITShortcutTests {
         precondition(launch.takeExplicitRequest())
         precondition(!launch.takeAutomaticRequest(if: true))
         print("JIT shortcut: foreground intent, explicit requests and launch/VPN handoff passed")
+
+        let pending = try await query(wait: 0)
+        precondition(pending == false)
+        let turnOn = Task { @MainActor in
+            try await Task.sleep(for: .milliseconds(100))
+            JITBootstrap.confirmedReady = true
+        }
+        let enabled = try await query(wait: 5)
+        try await turnOn.value
+        precondition(enabled == true)
+        let immediate = try await query(wait: 0)
+        precondition(immediate == true)
+        JITBootstrap.confirmedReady = false
+        let timeout = try await query(wait: 1)
+        precondition(timeout == false)
+        let cancelled = Task { try await query(wait: 30) }
+        cancelled.cancel()
+        do {
+            _ = try await cancelled.value
+            preconditionFailure("A cancelled wait must stop")
+        } catch is CancellationError {}
+        precondition(JITCoordinator.shared.requests == 1)
+        print("JIT status shortcut: Boolean off/on, pending activation, timeout and cancellation passed")
     }
 }

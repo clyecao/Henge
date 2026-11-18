@@ -23,5 +23,9 @@ struct HengeShortcuts: AppShortcutsProvider {
                     phrases: ["Turn on JIT in \(.applicationName)"],
                     shortTitle: LocalizedStringResource("Turn On JIT", table: "HengeShortcuts"),
                     systemImageName: "bolt.fill")
+        AppShortcut(intent: IsJITEnabledIntent(),
+                    phrases: ["Check JIT status in \(.applicationName)"],
+                    shortTitle: LocalizedStringResource("Is JIT Enabled?", table: "HengeShortcuts"),
+                    systemImageName: "bolt.badge.checkmark")
     }
 }

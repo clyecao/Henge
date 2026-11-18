@@ -178,10 +178,13 @@ enum JITBootstrap {
     /// The one try at making the region without a debugger has been made (it is not repeated: the answer will not change).
     nonisolated(unsafe) static private var selfGrantTried = false
 
+    /// Process-local evidence of usable JIT. Reading this never starts a helper, probe or allocation.
+    static var confirmedReady: Bool { prewarmed || isLive || mapJITResult == true }
+
     /// Whether Henge has JIT now: a debugger marked it, or the region is already held. Before iOS 26 this tries, once, to make
     /// the region itself, which is all TrollStore and jailbroken devices need. Cheap after the first call, and logs nothing.
     static var ready: Bool {
-        if prewarmed || isLive { return true }
+        if confirmedReady { return true }
         // On a TXM device the debugger must also answer the brk that claims the region. CS_DEBUGGED alone is what opening
         // Henge from StikDebug's app list gives (no Henge script) or LiveContainer, and an install then stops at
         // "Henge has no JIT region" (#23).
