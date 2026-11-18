@@ -137,13 +137,18 @@ enum PointerLock {
 
     private(set) static weak var window: UIWindow?
     private static var localDisplay = false
+    private static var fillsScreen = false
 
     static func bind(_ window: UIWindow, localDisplay: Bool) {
         self.localDisplay = localDisplay
-        guard self.window !== window else { return }
+        // A smaller Stage Manager window can report a lock while the system pointer is still bounded.
+        let size = window.bounds.size, screen = window.screen.bounds.size
+        let full = abs(size.width - screen.width) < 1 && abs(size.height - screen.height) < 1
+        guard self.window !== window || fillsScreen != full else { return }
         let previous = self.window
         self.window = window
-        previous?.rootViewController?.setNeedsUpdateOfPrefersPointerLocked()
+        fillsScreen = full
+        if previous !== window { previous?.rootViewController?.setNeedsUpdateOfPrefersPointerLocked() }
         set(wanted)
     }
 
@@ -153,7 +158,7 @@ enum PointerLock {
         let kind: AnyClass = type(of: root)
         if patched.insert(ObjectIdentifier(kind)).inserted {
             let answer: @convention(block) (UIViewController) -> Bool = { vc in
-                wanted && vc.viewIfLoaded?.window === window
+                wanted && fillsScreen && vc.viewIfLoaded?.window === window
             }
             class_replaceMethod(kind, #selector(getter: UIViewController.prefersPointerLocked), imp_implementationWithBlock(answer), "B@:")
         }
@@ -163,7 +168,7 @@ enum PointerLock {
     static var route: PhysicalPointerRoute {
         let scene = window?.windowScene
         return PhysicalPointerRoute(active: wanted && window?.isKeyWindow == true && scene?.activationState == .foregroundActive,
-                                    locked: scene?.pointerLockState?.isLocked == true,
+                                    locked: fillsScreen && scene?.pointerLockState?.isLocked == true,
                                     localDisplay: Device.isPad && localDisplay)
     }
 }
