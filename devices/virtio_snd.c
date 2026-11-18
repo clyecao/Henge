@@ -37,7 +37,7 @@ static int logging(void) {
     return on;
 }
 
-static uint64_t now_ns(void) {
+static uint64_t monotonic_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
@@ -116,7 +116,7 @@ static uint32_t capture_control(HvVirtioSnd *d, uint32_t code, const uint8_t *re
             d->capture.received = d->capture.silenced = d->capture.underruns = 0;
             d->capture.input_block_frames = 0;
             d->capture.source_active = 0;
-            d->capture.start_ns = now_ns();
+            d->capture.start_ns = d->now_ns();
             d->capture.running = 1;
         }
         break;
@@ -229,7 +229,7 @@ static uint32_t control(HvVirtioSnd *d, const HvVirtqElem *e) {
         }
         if (!d->running) {
             d->running = 1;
-            d->clock_start_ns = now_ns();
+            d->clock_start_ns = d->now_ns();
             d->clock_start_consumed = atomic_load(&d->consumed);
             if (d->backend.start && d->backend.start(d->backend.opaque, d->channels, d->format, d->rate_hz) != 0)
                 d->backend.start = NULL; /* the host cannot play it: drain by the clock instead */
@@ -331,7 +331,7 @@ void hv_virtio_snd_poll(HvVirtioSnd *d) {
        bursts gives voice-processing clients a jittery input clock. Hold two
        host blocks before playing real input, so callback jitter doesn't cut
        silence into otherwise continuous speech. */
-    uint64_t due = d->capture.running ? (now_ns() - d->capture.start_ns) / 1000 * 48 / 1000 : 0;
+    uint64_t due = d->capture.running ? (d->now_ns() - d->capture.start_ns) / 1000 * 48 / 1000 : 0;
     /* Bound recovery after the VM was descheduled; discard stale capture too. */
     if (due > d->capture.delivered + HV_VSND_CAPTURE_FRAMES) {
         d->capture.delivered = due - HV_VSND_CAPTURE_FRAMES;
@@ -384,7 +384,7 @@ void hv_virtio_snd_poll(HvVirtioSnd *d) {
     pthread_mutex_unlock(&d->capture_mu);
     /* No backend: the stream plays at its rate by the wall clock. */
     if (d->running && !d->backend.start && d->frame_bytes) {
-        uint64_t now = now_ns();
+        uint64_t now = d->now_ns();
         uint64_t target = d->clock_start_consumed +
                           (now - d->clock_start_ns) * d->rate_hz / 1000000000ull * d->frame_bytes;
         uint64_t w = atomic_load(&d->written);
@@ -477,6 +477,7 @@ HvVirtioSnd *hv_virtio_snd_create(HvMachine *m, HvPcie *bus) {
     v->dev = d;
     v->notify = notify;
     v->reset_device = reset_device;
+    d->now_ns = monotonic_ns;
     uint32_t jacks = 1, streams = 2, chmaps = 2;
     memcpy(v->config, &jacks, 4);
     memcpy(v->config + 4, &streams, 4);
@@ -535,7 +536,7 @@ void hv_virtio_snd_destroy(HvVirtioSnd *d) {
    without one starts from now (host times from before mean nothing). */
 void hv_virtio_snd_resume(HvVirtioSnd *d) {
     if (!d) return;
-    d->clock_start_ns = now_ns();
+    d->clock_start_ns = d->now_ns();
     d->clock_start_consumed = atomic_load(&d->consumed);
     if (d->running && d->backend.start && d->backend.start(d->backend.opaque, d->channels, d->format, d->rate_hz) != 0)
         d->backend.start = NULL;
@@ -543,7 +544,7 @@ void hv_virtio_snd_resume(HvVirtioSnd *d) {
     /* Guest RX descriptors and their partial period survive; host samples and
        permission do not. Start a fresh clock, without a burst of catch-up PCM. */
     d->capture.enabled = 0;
-    d->capture.start_ns = now_ns();
+    d->capture.start_ns = d->now_ns();
     d->capture.delivered = d->capture.written = d->capture.consumed = 0;
     d->capture.input_block_frames = 0;
     d->capture.source_active = 0;

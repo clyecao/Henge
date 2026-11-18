@@ -36,6 +36,7 @@ typedef struct HvVirtioSndBackend {
 typedef struct HvVirtioSnd {
     HvVirtio vio;
     HvVirtioSndBackend backend;
+    uint64_t (*now_ns)(void); /* Monotonic PCM clock, shared by stream control and queue polling. */
     /* the output stream's parameters (set by PCM_SET_PARAMS) */
     unsigned channels, format, rate, frame_bytes, rate_hz;
     uint32_t buffer_bytes, period_bytes;

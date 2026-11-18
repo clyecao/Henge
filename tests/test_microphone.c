@@ -7,14 +7,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 static HvMachine machine;
 static uint8_t *memory;
 static int checks, failures;
 #define RAM 0x80000000ull
 #define CHECK(x) do { checks++; if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); failures++; } } while (0)
-static uint64_t now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + t.tv_nsec; }
+static uint64_t time_ns;
+static uint64_t test_clock(void) { return time_ns; }
 static void *at(uint64_t pa) { return memory + (pa - RAM); }
 static uint32_t u32(const void *p) { uint32_t n; memcpy(&n, p, 4); return n; }
 static uint16_t u16(const void *p) { uint16_t n; memcpy(&n, p, 2); return n; }
@@ -65,6 +65,7 @@ static void capture(HvVirtioSnd *s, unsigned bytes) {
 static void sound_test(HvPcie *pci) {
     HvVirtioSnd *s = hv_virtio_snd_create(&machine, pci);
     CHECK(s != NULL);
+    s->now_ns = test_clock;
     queue(&s->vio, 0); queue(&s->vio, 2); queue(&s->vio, 3);
     s->vio.status = 15;
     CHECK(u32(s->vio.config + 4) == 2);
@@ -90,7 +91,7 @@ static void sound_test(HvPcie *pci) {
         samples[0] = -1; samples[1] = 1; samples[2] = NAN;
         hv_virtio_snd_capture_push(s, samples, 480);
         hv_virtio_snd_capture_push(s, samples, 480); /* prime the input jitter buffer */
-        s->capture.start_ns = now_ns() - 20000000;
+        time_ns = s->capture.start_ns + 20000000;
         hv_virtio_snd_poll(s);
         CHECK(u16(at(s->vio.q[3].used + 2)) == used + 1);
         CHECK(u32(at(RAM + 0x21000 + 480 * bytes)) == 0x8000);
@@ -107,7 +108,7 @@ static void sound_test(HvPcie *pci) {
         hv_virtio_snd_capture_enable(s, 0);
         hv_virtio_snd_capture_push(s, samples, 480);
         capture(s, 480 * bytes);
-        s->capture.start_ns = now_ns() - 40000000;
+        time_ns = s->capture.start_ns + 40000000;
         hv_virtio_snd_poll(s);
         const uint8_t *zero = at(RAM + 0x21000);
         int silent = 1;
@@ -131,24 +132,24 @@ static void sound_test(HvPcie *pci) {
     hv_virtio_snd_capture_push(s, blocks, 480);
     hv_virtio_snd_capture_push(s, blocks + 480, 480);
     CHECK(s->capture.start_ns == epoch); /* callbacks cannot move the guest clock */
-    s->capture.start_ns = now_ns() - 10000000;
+    time_ns = s->capture.start_ns + 10000000;
     hv_virtio_snd_poll(s);
     CHECK(u16(at(s->vio.q[3].used + 2)) == used);
     CHECK(s->capture.offset == 480 * 4);
     hv_virtio_snd_capture_push(s, blocks, 480);
-    s->capture.start_ns = now_ns() - 20000000;
+    time_ns = s->capture.start_ns + 20000000;
     hv_virtio_snd_poll(s);
     CHECK(u16(at(s->vio.q[3].used + 2)) == used + 1);
     CHECK(!memcmp(at(RAM + 0x21000), blocks, sizeof blocks));
     /* An available block must not make the next period complete early. */
     capture(s, 480 * 4);
     CHECK(u16(at(s->vio.q[3].used + 2)) == used + 1);
-    s->capture.start_ns = now_ns() - 30000000;
+    time_ns = s->capture.start_ns + 30000000;
     hv_virtio_snd_poll(s);
     CHECK(u16(at(s->vio.q[3].used + 2)) == used + 2);
     CHECK(!memcmp(at(RAM + 0x21000), blocks, 480 * 4));
     /* A failed source supplies paced silence, and fresh audio can re-prime. */
-    s->capture.start_ns = now_ns() - 40000000;
+    time_ns = s->capture.start_ns + 40000000;
     capture(s, 480 * 4);
     CHECK(u16(at(s->vio.q[3].used + 2)) == used + 3);
     const float *silence = at(RAM + 0x21000);
@@ -162,7 +163,7 @@ static void sound_test(HvPcie *pci) {
     hv_virtio_snd_capture_push(s, blocks + 481, 479);
     capture(s, 480 * 4);
     CHECK(u16(at(s->vio.q[3].used + 2)) == used + 3);
-    s->capture.start_ns = now_ns() - 50000000;
+    time_ns = s->capture.start_ns + 50000000;
     hv_virtio_snd_poll(s);
     CHECK(u16(at(s->vio.q[3].used + 2)) == used + 4);
     CHECK(!memcmp(at(RAM + 0x21000), blocks, 480 * 4));
@@ -185,6 +186,23 @@ static void sound_test(HvPcie *pci) {
     CHECK(command(s, 0x102, 1, 0) == 0x8000);
     CHECK(command(s, 0x104, 1, 0) == 0x8000);
     hv_virtio_snd_capture_enable(s, 1);
+    /* Record one period while playing a second output buffer. The host mic
+       starts 1 ms late, so precisely the first 48 input frames are silent. */
+    capture(s, 480 * 4);
+    time_ns += 1000000;
+    hv_virtio_snd_poll(s);
+    CHECK(s->capture.offset == 48 * 4);
+    hv_virtio_snd_capture_push(s, blocks, 480);
+    hv_virtio_snd_capture_push(s, blocks + 480, 480);
+    post(&s->vio, 2, out, 2);
+    CHECK(hv_virtio_snd_pull(s, played, sizeof played) == sizeof played);
+    time_ns += 9000000;
+    hv_virtio_snd_poll(s);
+    CHECK(!memcmp(played, tx + 4, sizeof played) && u16(at(s->vio.q[2].used + 2)) == 2);
+    const float zeros[48] = {0};
+    const float *input = at(RAM + 0x21000);
+    CHECK(!memcmp(input, zeros, sizeof zeros) && !memcmp(input + 48, blocks, 432 * sizeof(float)));
+    CHECK(u32(at(RAM + 0x21000 + 480 * 4)) == 0x8000);
     float *overflow = calloc(HV_VSND_CAPTURE_FRAMES + 128, sizeof(float));
     hv_virtio_snd_capture_push(s, overflow, HV_VSND_CAPTURE_FRAMES + 128);
     CHECK(s->capture.written - s->capture.consumed == HV_VSND_CAPTURE_FRAMES);
