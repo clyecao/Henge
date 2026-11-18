@@ -106,6 +106,15 @@ int main(void) {
     test_flat();
     test_directory();
     test_missing();
-    printf("PVG surface pages: %d checks, %d failures\n", checks, failures);
+    check("icon needs only its final pixels", hv_pvg_linear_texture_fits(72, 72, 4, 11952, 1440, 114480));
+    check("one byte short", !hv_pvg_linear_texture_fits(72, 72, 4, 11952, 1440, 114479));
+    check("single row needs no end padding", hv_pvg_linear_texture_fits(4, 1, 4, 0, 256, 16));
+    check("short stride", !hv_pvg_linear_texture_fits(4, 2, 4, 0, 15, 64));
+    check("zero stride", !hv_pvg_linear_texture_fits(4, 1, 4, 0, 0, 64));
+    check("empty height", !hv_pvg_linear_texture_fits(4, 0, 4, 0, 16, 64));
+    check("width multiplication cannot wrap", !hv_pvg_linear_texture_fits(UINT64_MAX, 1, 4, 0, 16, 64));
+    check("strided height cannot wrap", !hv_pvg_linear_texture_fits(4, UINT64_MAX, 4, 0, 16, 64));
+    check("offset cannot wrap", !hv_pvg_linear_texture_fits(4, 1, 4, UINT64_MAX - 7, 16, UINT64_MAX));
+    printf("PVG surface pages and linear textures: %d checks, %d failures\n", checks, failures);
     return failures != 0;
 }

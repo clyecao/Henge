@@ -3,6 +3,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+int hv_pvg_linear_texture_fits(uint64_t width, uint64_t height, uint64_t bpp, uint64_t offset, uint64_t row, uint64_t length) {
+    if (!width || !height || !bpp || width > row / bpp || offset > length) return 0;
+    uint64_t last_row = width * bpp; /* bounded by row */
+    uint64_t room = length - offset;
+    return last_row <= room && height - 1 <= (room - last_row) / row;
+}
+
 /* A 16 KB list holds 4096 page entries (64 MiB of pixels). Larger surfaces use
    a directory of list pages. Reading that directory as a flat list maps the
    tables themselves and unrelated memory as pixels, allowing GPU writes to

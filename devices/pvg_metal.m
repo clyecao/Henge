@@ -242,7 +242,8 @@ static BOOL linear_texture_fits(id<MTLDevice> device, MTLTextureDescriptor *t, u
     NSUInteger bpp = pixel_bytes(t.pixelFormat);
     if (!bpp) return YES; /* not checked: as before */
     NSUInteger align = [device minimumLinearTextureAlignmentForPixelFormat:t.pixelFormat];
-    BOOL ok = row >= t.width * bpp && (!align || (row % align == 0 && offset % align == 0)) && t.height && offset + row * (t.height - 1) + t.width * bpp <= length;
+    BOOL ok = (!align || (row % align == 0 && offset % align == 0)) &&
+              hv_pvg_linear_texture_fits(t.width, t.height, bpp, offset, row, length);
     if (!ok) {
         static int told;
         if (told++ < 8) fprintf(stderr, "hengevm: pvg-metal: a %lux%lu format %lu texture can't sit on rows of %llu bytes at %llu in %lu: left empty\n",
