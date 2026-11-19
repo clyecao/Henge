@@ -106,7 +106,7 @@ typedef struct Request {
     char if_header[256];
     const char *if_match, *if_none_match, *if_modified_since; /* in this connection's request headers */
     long long length;
-    int chunked, expect_continue, close, overwrite, depth;
+    int chunked, expect_continue, close, overwrite, depth, webdavfs;
     long long range_from, range_to; /* -1: none */
     long chunk_left;
     int body_done;
@@ -718,6 +718,20 @@ static int do_get(Conn *c, Request *r) {
             snprintf(h, sizeof h, "Content-Range: bytes */%lld\r\n", (long long)st.st_size);
             return respond(c, r, 416, "Range Not Satisfiable", h, NULL, 0);
         }
+        /* Apple's webdavfs makes a separate bounded GET when a read is ahead of
+           its background download. If it reads the UDIF trailer that way,
+           DiskImageMounter can hand a still-downloading vnode to diskimagesiod.
+           Its different uid then gets EACCES on fstat. Declining just this probe
+           makes webdavfs wait for the trailer in its normal local cache. */
+        const char *name = strrchr(r->path, '/') + 1;
+        const char *ext = strrchr(name, '.');
+        if (r->webdavfs && !strcmp(r->method, "GET") && r->range_from > 0 &&
+            st.st_size >= 512 && r->range_to >= st.st_size - 1 &&
+            ext && !strcasecmp(ext, ".dmg") && strncmp(name, "._", 2)) {
+            close(fd);
+            fprintf(stderr, "hengevm: share: deferring disk image trailer to the WebDAV cache\n");
+            return respond(c, r, 503, "Service Unavailable", "Cache-Control: no-store\r\n", NULL, 0);
+        }
         partial = 1;
     }
     long long len = st.st_size ? to - from + 1 : 0;
@@ -1120,6 +1134,7 @@ static int read_request(Conn *c, Request *r) {
         else if (header_is(line, "Transfer-Encoding", &v)) r->chunked = strcasestr(v, "chunked") != NULL;
         else if (header_is(line, "Expect", &v)) r->expect_continue = strcasestr(v, "100-continue") != NULL;
         else if (header_is(line, "Connection", &v)) r->close = strcasestr(v, "close") != NULL || r->close;
+        else if (header_is(line, "User-Agent", &v)) r->webdavfs = !strncasecmp(v, "WebDAVFS/", 9);
         else if (header_is(line, "Depth", &v)) r->depth = v[0] == '0' ? 0 : 1;
         else if (header_is(line, "Overwrite", &v)) r->overwrite = v[0] != 'F' && v[0] != 'f';
         else if (header_is(line, "If", &v)) snprintf(r->if_header, sizeof r->if_header, "%s", v);

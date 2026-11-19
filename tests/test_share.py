@@ -107,6 +107,31 @@ def test_share(root, endpoint):
     assert properties.findtext(".//{DAV:}getetag") == request(endpoint, "HEAD")[1]["ETag"]
 
 
+def test_image_cold_read(root, endpoint):
+    data = bytes(range(256)) * 64
+    path = "/Installer.DMG"
+    (root / path[1:]).write_bytes(data)
+    apple = {"User-Agent": "WebDAVFS/4.0 Darwin"}
+    start = len(data) - 12  # DiskImageMounter's cold probe on a UDIF image
+    trailer = f"bytes={start}-{len(data) - 1}"
+    status, headers, body = request(endpoint, "GET", path=path, Range=trailer, **apple)
+    assert (status, headers["Cache-Control"], body) == (503, "no-store", b"")
+
+    # The parallel transfer and its resume can still populate the entire cache.
+    status, headers, body = request(endpoint, "GET", path=path, **apple)
+    assert (status, body) == (200, data)
+    status, _, tail = request(endpoint, "GET", path=path, Range=f"bytes={start}-",
+                              **{"If-Range": headers["Last-Modified"]}, **apple)
+    assert (status, tail) == (206, data[start:])
+    assert request(endpoint, "GET", path=path, Range="bytes=256-511", **apple)[2] == data[256:512]
+    assert request(endpoint, "GET", path=path, Range="bytes=-12", **apple)[2] == data[start:]
+    assert request(endpoint, "HEAD", path=path, Range=trailer, **apple)[0] == 206
+    assert request(endpoint, "GET", path=path, Range=trailer)[2] == data[start:]
+    for name in ("Installer.zip", "._Installer.DMG"):
+        (root / name).write_bytes(data)
+        assert request(endpoint, "GET", path="/" + name, Range=trailer, **apple)[2] == data[start:]
+
+
 if __name__ == "__main__":
     lib = ctypes.CDLL(str(Path(sys.argv[1]).resolve()))
     lib.hv_share_start.argtypes = [ctypes.c_char_p] * 3
@@ -117,5 +142,7 @@ if __name__ == "__main__":
         assert lib.hv_share_start(bytes(root), bytes(endpoint), None) == 0
         test_battery(lib, endpoint)
         test_share(root, endpoint)
+        test_image_cold_read(root, endpoint)
     print("Battery long poll: initial, charge transitions, unavailable and legacy clipboard passed")
     print("WebDAV: cache revalidation, conditional writes and property round-trip passed")
+    print("WebDAV: cold disk image trailer probes and normal range reads passed")
