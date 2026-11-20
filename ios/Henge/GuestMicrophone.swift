@@ -4,18 +4,16 @@ import SwiftUI
 /// Shares audio only while this session is in front and macOS has started its input stream.
 @MainActor
 final class GuestMicrophone: ObservableObject {
-    @Published var enabled = false {
+    @Published var enabled: Bool {
         didSet {
-            if enabled && AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
-                AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
-                    DispatchQueue.main.async { self?.checkPermission() }
-                }
-            }
-            checkPermission()
+            preference.enabled = enabled
+            checkPermission(requestIfNeeded: true)
         }
     }
     @Published private(set) var status = "Off"
 
+    private let preference: MicrophoneSharingPreference
+    private var requestingPermission = false
     private var foreground = false
     private var allowed = false
     private var interrupted = false
@@ -23,7 +21,10 @@ final class GuestMicrophone: ObservableObject {
     private var generation: UInt64 = 0
     private var observers: [NSObjectProtocol] = []
 
-    init() {
+    init(macID: UUID) {
+        let preference = MicrophoneSharingPreference(macID: macID)
+        self.preference = preference
+        enabled = preference.enabled
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             guard let self, let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt else { return }
@@ -55,8 +56,17 @@ final class GuestMicrophone: ObservableObject {
 
     deinit { observers.forEach(NotificationCenter.default.removeObserver) }
 
-    private func checkPermission() {
+    private func checkPermission(requestIfNeeded: Bool = false) {
         let permission = AVCaptureDevice.authorizationStatus(for: .audio)
+        if requestIfNeeded && foreground && enabled && permission == .notDetermined && !requestingPermission {
+            requestingPermission = true
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.requestingPermission = false
+                    self?.checkPermission()
+                }
+            }
+        }
         allowed = enabled && permission == .authorized
         if !allowed { stopCapture() }
         if !enabled { status = "Off" }
@@ -70,7 +80,7 @@ final class GuestMicrophone: ObservableObject {
         guard foreground != active else { return }
         foreground = active
         if active { recoverOutput() } else { stopCapture() }
-        checkPermission()
+        checkPermission(requestIfNeeded: active)
     }
 
     private func recoverOutput() {

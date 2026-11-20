@@ -143,9 +143,17 @@ test-mouse-reports: $(B)/test_mouse_reports
 $(B)/test_microphone: tests/test_microphone.c $(ENGINE) $(B)/virtio_snd.o $(B)/virtio.o $(B)/pcie.o $(B)/gicv3.o
 	$(CC) $(CFLAGS) $^ -o $@
 
-test-microphone: $(B)/test_microphone
+$(B)/test_microphone_preference: tests/test_microphone_preference.swift ios/Henge/MicrophoneSharingPreference.swift | $(B)
+	xcrun --sdk macosx swiftc $^ -o $@
+
+test-microphone-preference: $(B)/test_microphone_preference
+	@set -e; mac_id=$$(uuidgen); other_id=$$(uuidgen); \
+	for step in enable disable verify; do $< $$step $$mac_id $$other_id; done
+	@echo "Microphone sharing: per-Mac preferences survive relaunch"
+
+test-microphone: $(B)/test_microphone test-microphone-preference
 	$(B)/test_microphone
-.PHONY: test-microphone
+.PHONY: test-microphone test-microphone-preference
 
 $(B)/test_pvg_lifecycle: tests/test_pvg_lifecycle.m $(ENGINE) $(DEV)
 	$(CC) $(CFLAGS) -fobjc-arc $^ $(METAL_LIBS) -o $@
@@ -180,7 +188,7 @@ $(B)/test_%: tests/test_%.c tests/%_programs.S tests/harness.S tests/harness.h $
 test: all test-engine
 
 # Engine and built-in service checks without the desktop restore tool or its external libraries.
-test-engine: $(TESTS) test-share
+test-engine: $(TESTS) test-share test-microphone-preference
 	@ulimit -s 65520; for t in $(TESTS); do echo "== $$t"; $$t || exit 1; done # a test keeps a whole HvCpu (2 MB of TLB and more) on its stack
 
 test-code-cache: $(B)/test_jit_region $(B)/test_jit $(B)/test_jit_cache

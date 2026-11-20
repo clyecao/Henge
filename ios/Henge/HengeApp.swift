@@ -62,6 +62,7 @@ struct RootView: View {
             .disabled(machines.growing != nil)
             if let running {
                 SessionView(mac: running) { self.running = nil }
+                    .id(running.id)
                     .environment(\.colorScheme, .dark) // still dark while it fades out over a light page
                     .transition(.opacity)
             }

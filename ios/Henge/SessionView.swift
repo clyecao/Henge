@@ -8,7 +8,7 @@ struct SessionView: View {
     let close: () -> Void
 
     @StateObject private var display = DisplayRouter()
-    @StateObject private var microphone = GuestMicrophone()
+    @StateObject private var microphone: GuestMicrophone
     @State private var error: String?
     @State private var state: Int32 = 0
     @State private var bootAttempt = 0
@@ -48,6 +48,11 @@ struct SessionView: View {
     @State private var shown = CGSize(width: 0.5, height: 0.5) // how much of the Mac's screen the zoomed view shows
     @Environment(\.scenePhase) private var scenePhase
 
+    init(mac: VirtualMac, close: @escaping () -> Void) {
+        self.mac = mac
+        self.close = close
+        _microphone = StateObject(wrappedValue: GuestMicrophone(macID: mac.id))
+    }
 
     var body: some View {
         GeometryReader { geo in

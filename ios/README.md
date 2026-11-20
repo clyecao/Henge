@@ -70,9 +70,10 @@ to record. In macOS, choose **System Settings → Sound → Input → Apple Virt
 Sound Device**. To check the full path, speak into the iPhone or iPad and make
 a short audio recording in QuickTime Player.
 
-Sharing defaults to off for each session. When a Mac app requests input, Henge
-captures the current audio route at its hardware rate and supplies 48 kHz mono
-to the VM. Switching off sharing or leaving the foreground stops capture.
+Sharing starts off for each virtual Mac. Henge remembers your choice when you
+close and reopen the app. When a Mac app requests input, Henge captures the
+current audio route at its hardware rate and supplies 48 kHz mono to the VM.
+Switching off sharing or leaving the foreground stops capture.
 The Mac receives paced silence while the host microphone is unavailable.
 The input stream and its partial periods survive Instant Resume within a build.
 Run `make test-microphone test-vm-lifecycle` for capture and resume tests.

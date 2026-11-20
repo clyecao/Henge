@@ -335,6 +335,7 @@ final class Machines: ObservableObject {
     func delete(_ id: UUID) {
         guard growing == nil else { return }
         try? FileManager.default.removeItem(at: Self.directory(for: id))
+        MicrophoneSharingPreference(macID: id).enabled = false
         all.removeAll { $0.id == id }
         save()
     }
